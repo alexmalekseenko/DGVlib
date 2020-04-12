@@ -28,30 +28,29 @@ use nrtype ! contains kind parameters (DP), (DP), (I4B) etc.
 !  integration in the initial data. 
 !
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! These are the paramters of the gas for the shock wave Mach 10!
+! These are the paramters of the gas for the shock wave Mach 3.0!
 ! Gas constants for Ar:  
 ! mass = mol_mass! molecular mass
-real (DP), parameter, private :: mass=6.63d-26 
+real (DP), parameter, private :: mass=6.633520884527004d-26 
 ! conditions before the shock wave,
-real (DP), parameter, private :: T1=0.3_DP  ! dimensionless temperature  -- ratio to T_{\infyt}, 
-real (DP), parameter, private :: d1=1.6094213293_DP*2.0_DP  ! dimensionless density == ration to initial number density
-real (DP), parameter, private :: u1=0.7749989203_DP ! dimensionless bulk velocity  -- ratio to C_{\infty}
+real (DP), parameter, private :: T1=0.05_DP  ! dimensionless temperature  -- ratio to T_{\infyt}, 
+real (DP), parameter, private :: d1=1.6094213293_DP  ! dimensionless density == ration to initial number density
+real (DP), parameter, private :: u1=0.7756706713_DP ! dimensionless bulk velocity  -- ratio to C_{\infty}
 real (DP), parameter, private :: v1=0.0_DP ! v1=?
 real (DP), parameter, private :: w1=0.0_DP ! w1=?
 
 ! condtions after the shock wave 
-real (DP), parameter, private :: T2=0.4643212637_DP   !  dimensionless temperature  -- ratio to T_{\infyt}, 
-real (DP), parameter, private :: d2=2.8628476989_DP*2.0_DP   !  dimensionless density == ration to initial number density
-real (DP), parameter, private :: u2=0.4356848770_DP ! dimensionless bulk velocity  -- ratio to C_{\infty}
+real (DP), parameter, private :: T2=0.2687257618_DP   !  dimensionless temperature  -- ratio to T_{\infyt}, 
+real (DP), parameter, private :: d2=5.3302854722_DP   !  dimensionless density == ration to initial number density
+real (DP), parameter, private :: u2=0.2342052720_DP ! dimensionless bulk velocity  -- ratio to C_{\infty}
 real (DP), parameter, private :: v2=0.0_DP ! v2=?
 real (DP), parameter, private :: w2=0.0_DP ! w2=?
-! 
 real (DP), parameter, private :: lambda = 1.0_DP ! charachteristic length
 !
 real (DP), parameter, private :: pi25DT = 3.141592653589793238462643d0
 !! Constants for switching ::
-real (DP), parameter, private :: x1=-0.01_DP   ! first function "begin fade" (before fade coefficient of first maxwellian is 1)
-real (DP), parameter, private :: x2=0.01_DP   ! first function "end fade"   (after fade coefficient of first maxwellian is 0)
+real (DP), parameter :: x1=0.014_DP   ! first function "begin fade" (before fade coefficient of first maxwellian is 1)
+real (DP), parameter :: x2=0.022_DP   ! first function "end fade"   (after fade coefficient of first maxwellian is 0)
 !!! 
 contains 
 

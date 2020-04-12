@@ -26,11 +26,11 @@ contains
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! maxwelveldist (T,u_0,n,u) result (y)
 ! 
-! This function evauates the 1D maxwellian equilibrium distribution with given temperature and average velocity
+! This function evauates the 3D velocity dimensionless maxwellian equilibrium distribution with given temperature and average velocity
 ! Temperature and average velocity can be arrays (corresponding to different points in x variable
 !
 ! This function evaluates 
-! f2_{M}(t,x,u)=(2\pi RT(t,x))^{-1/2} \exp(-\frac{(u-\bar{u})^2}{2RT}) 
+! f_{M}(t,x,u)=(\pi T(t,x))^{-1/2} \exp(-\frac{(u-\bar{u})^2}{2RT}) 
 !
 ! This is a reloadable function
 !!!!!!!!!!!!!!!!!!!!!!!
@@ -49,8 +49,8 @@ function maxwelveldist_T_vector_u_vectors (T,u_0,v_0,w_0,n,u,v,w) result (y)
 !!!     
 beta=sqrt(pi25DT*T)*(pi25DT*T)
 do i=1,size(u)
-y(:,i) = n*exp(-((u(i)-u_0)*(u(i)-u_0)+(v(i)-v_0)*(v(i)-v_0)+&
-                  (w(i)-w_0)*(w(i)-w_0))/max(T,0.0000001_DP))/beta
+ y(:,i) = n*exp(-((u(i)-u_0)*(u(i)-u_0)+(v(i)-v_0)*(v(i)-v_0)+&
+                   (w(i)-w_0)*(w(i)-w_0))/max(T,0.0000001_DP))/beta
 end do 
 end function maxwelveldist_T_vector_u_vectors
 
@@ -105,7 +105,7 @@ end function maxwelveldist
 ! Note that the parameters are dependent on time and velocity but not in the spacial variable x
 !
 ! This function evaluates 
-! f_0(t,u)=\frac{n(t)}{sqrt{(\pi RT(t))}} \exp(-c'\mathbb{T}c) 
+! f_0(t,u)=\frac{n(t)}{\sqrt{(\pi^3 det(\mathbb{T})}} \exp(-c'\mathbb{T}c) 
 !
 !!!!!!!!!!!!!!!!!!!!!!!
 
@@ -207,5 +207,55 @@ f0 = maxwelveldist(T,u_0,v_0,w_0,n,nodes_u,nodes_v,nodes_w)*ShCorr
 deallocate (ShCorr,c_u,c_v,c_w)
 
 end function Shakhov_f0
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!EvalGrad13f0
+!
+!Evaluates the 13 moment grad function
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+function EvalGrad13f0(n,p,sigma,q,u_0,v_0,w_0,nodes_u,nodes_v,nodes_w) result(f0)
+
+real (DP), intent (in) :: p    ! Pressure, scalar
+real (DP), intent (in) :: n    ! density parameter (scalar)
+real (DP), intent (in) :: u_0,v_0,w_0  ! average velocity (may depend on x)
+real (DP), dimension(:), intent (in) :: nodes_u,nodes_v,nodes_w ! These are the velocity nodes
+!!! T,u_0 must be the same size !!! 
+real (DP), dimension(3,3), intent(in) :: sigma !The traceless stress tensor
+real (DP), dimension(3), intent(in) :: q !The heatflux 
+
+real (DP), dimension (1:size(nodes_u,1)) :: f0 ! result -- the 13 moment grad function
+
+real (DP), dimension(3) :: Left, c ! c-v vector
+real (DP) :: T !Temperature, derived from the density and the pressure
+real (DP) :: trace_c !A varaible to store the trace of the velocity
+integer (I4B) :: Unodes ! the number of nodes in velocity space
+integer (I4B) :: i,j,k ! these are local counters
+
+Unodes = size(nodes_u)
+T=2*p/n
+
+do i=1,Unodes
+   c(1) = nodes_u(i) - u_0
+   c(2) = nodes_v(i) - v_0
+   c(3) = nodes_w(i) - w_0
+   
+   trace_c=sum(c*c)
+   
+
+   f0(i)=(sigma(1,1)*(c(1)*c(1) - trace_c/3.0_DP) + 2*sigma(1,2)*c(1)*c(2) + 2*sigma(1,3)*c(1)*c(3) + &
+        sigma(2,2)*(c(2)*c(2) - trace_c/3.0_DP) + 2*sigma(2,3)*c(2)*c(3) + sigma(3,3)*(c(3)*c(3) - trace_c/3.0_DP))/(p*T)
+        
+   f0(i)=f0(i)+ 4.0_DP/(5.0_DP*p*T)*(trace_c / T - 5.0_DP/2.0_DP)*(q(1)*c(1)+q(2)*c(2)+q(3)*c(3))
+   
+   f0(i)=f0(i)+1
+   
+   f0(i)=maxwelveldist(T,u_0,v_0,w_0,n,nodes_u(i),nodes_v(i),nodes_w(i))*f0(i)
+    
+end do
+
+end function EvalGrad13f0
+
+
 
 end module DGV_distributions_mod
