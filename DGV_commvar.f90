@@ -482,7 +482,7 @@ integer (I4B) :: My_Acopy_Univ_indx ! these keep the index of the Acopy universe
 integer  :: Lin_Self_Send_FmA_Flag ! this flag =0 if the master node of a Acopy Universe also appears as a processor recieving 
 									! components of the linearized operator from this universe.   
 
-integer (I4B), dimension (:,:), allocatable :: nodes_proc_groups ! this array will contain the beaking of velocity nodes among the Acopy universes
+!integer (I4B), dimension (:,:), allocatable :: nodes_proc_groups ! this array will contain the beaking of velocity nodes among the Acopy universes
                      ! format nodes_proc_groups(a,b) a=1 or 2, b=the index of the Acopy universe, a=1,num_Acopies
                      ! nodes_proc_groups(1,b) is the first and nodes_proc_groups(2,b) is the last node assigned to the Acopy Univ #b
                      
@@ -526,11 +526,45 @@ integer (I4B) :: num_lin_proc ! this variable will keep the numer of processors 
                               ! total number of processors in the MPI universe. 
 integer (I4B) :: num_Acopies ! this variable will store the desired number of times A is copied in memory between the processor. 
                              ! this is a good approach is A does not take a lot of storage, so say it fits in one node memory, say 16 procs.  
-                             ! however there are many nodes and essentially we chunk th enodes between groups of processors. each gorup will have a copy of entire A                              
+                             ! however there are many nodes and essentially we chunk the nodes between groups of processors. each gorup will have a copy of entire A                              
 integer (I4B) :: num_linstep_wait,lin_no_update ! this is the numeber of steps to wait until start computing linear solutio using consolidated linearied collision operator                             
               ! lin_no_update is the counter to see how many times we computed linearied collision operator without updating it.
 integer :: Acopy_irank ! MPI variable for universe Acopy. Gives the rank of this processor in the Acopy universe it belongs. Does not make sense on master node i.e. not valid with irank=0!!!                
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
+!!!!!!!!!!!!!!!!!!! MPI Variables for the evaluation of collision operator using Secondary Mesh !!!!!!!!!
+!!!
+
+integer :: MPI_LINEAR_COLL_WORLDII
+integer :: MPI_LINEAR_COLL_WORLD_GROUPII ! Communications and commpnicator group handles for creating a communicator
+                                        ! That will contain processes participating in consolidated evaluation of linearied operator.  
+integer, dimension(:), allocatable :: MPI_Acopy_UNIVSII, MPI_Acopy_UNIVS_GROUPII ! This array will hold pointers to universes that will receive a single copy of A_array.
+
+                                          ! the first element will keep the number of receives and the other elements will keep the number of the universes
+integer (I4B), dimension (:), allocatable :: procs_nodes_wldII ! this array will store nodes that are assigned for a processor 
+                                                               ! on which the program is running. the index runs trhought the nodes assigned for the 
+                                                               ! evaluation. It is expected that the node knows the necessary peices of arrys A
+
+integer (I4B) :: My_Acopy_Univ_indxII ! these keep the index of the Acopy universe that contain this proceesor   
+
+integer (I4B), dimension (:), allocatable :: Acopy_wrkldII
+        !! This array is very similar to the array procs_nodes_wld, with the exception that is applies to the ]
+        !! Acopy_universe rather than to individual processor. 
+        !! Specifically, each Acopy universe will have some nodes assigned to it. All processors in this universe 
+        !! will have a copy of this array containing the nodes that are assigned to their Acopy universe
+        !! no nodes belong to two Acopy universes at the same time and no two processors belong to the same Acopy 
+        !! universes, to there will be no ambiguity
+integer (I4B), dimension (:), allocatable :: procs_nodes_wld_Acopy_addrII
+        !! each slave processor will contribute components of the linearized operator 
+        !! in each Acopy universe an array will be created (FmA) containing the components of the linearized operator 
+        !! the rows of this array will correspond to the nodes listed in the Acopy_wrkld array
+        !! now Acopy_wrkld_addr will contain indices of nodes from the procs_nodes_wld on this processor in the 
+        !! its A copy Universe's array Acopy_wrkld. The length of the  procs_nodes_wld_Acopy_addr is tha same as      
+        !! array procs_nodes_wld. 
+integer :: Acopy_irankII ! MPI variable for universe Acopy. Gives the rank of this processor in the Acopy universe it belongs. Does not make sense on master node i.e. not valid with irank=0!!!                
                     
+!!!!!!!!!!!!!
+!!! local copies of the arrays, for convenience
+real (DP), dimension (:), allocatable :: nodes_u_loc, nodes_v_loc, nodes_w_loc, nodes_gwts_loc,nodes_symfctr_loc ! dump variables to keep coordinated to nodes assigend to this processor. 
+
 end module DGV_commvar

@@ -139,7 +139,7 @@ do iphi=1,size(nodes_Ashift,1)  ! Loop in the nodal points
       end if 
    end do   
    !! the arrays are set. Proceed to evaluate the matrix product   
-   fc(iphi)=2*sum(Aphi(1:k)*fxi(1:k)*fxi1(1:k))/nodes_gwts(iphi)     
+   fc(iphi)=2.0_DP*sum(Aphi(1:k)*fxi(1:k)*fxi1(1:k))/nodes_gwts(iphi)     
    deallocate (fxi,fxi1,Aphi)   
 end do ! End of the main loop in nodal points
 !
@@ -252,6 +252,277 @@ end do ! End of the main loop in nodal points
 end subroutine EvalCollisionPeriodicAPlus_DGV
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicAPlus_DGV_OMP (f,fc) 
+!
+! This is a copy of the above subroutine except OMP pragmas are added.
+!
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+! 
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phican
+!  nodes_dui,nodes_dvi,nodes_dwi,
+!  cells_ugi,cells_vgi,cells_wgi
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicAPlus_DGV_OMP(f,fc)
+
+use DGV_commvar, only: A,A_capphi,A_xi,A_xi1,cells_gou,cells_gov,cells_gow,&
+                   grids_cap_u,grids_cap_v,grids_cap_w,nodes_Ashift,nodes_phican,&
+                   nodes_dui,nodes_dvi,nodes_dwi,nodes_pcell,cells_ugi,cells_vgi,&
+                   cells_wgi,nodes_ui,nodes_vi,nodes_wi,nodes_gwts,Num_OMP_threads
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!! Interface for OpenMP runtime libraries !!!!!!!!!!!!!!!!!!!
+interface 
+ function omp_get_thread_num() result (y)
+   integer :: y 
+ end function omp_get_thread_num
+ function omp_get_num_threads() result (y)
+  integer :: y 
+ end function omp_get_num_threads 
+ function omp_get_num_procs() result (y)
+  integer :: y 
+ end function omp_get_num_procs
+ function omp_get_stack_size () result (y)
+  use nrtype
+  integer (I2B) :: y
+ end function omp_get_stack_size
+end interface  
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+!
+! OpenMP
+call omp_set_num_threads(Num_OMP_threads)
+!$OMP PARALLEL DO PRIVATE(dui,dvi,dwi,ixi,xicell,iuxicell,ivxicell,iwxicell, &
+!$OMP    ixi1,xi1cell,iuxi1cell,ivxi1cell,iwxi1cell,Ashift,phicap,j) &
+!$OMP    NUM_THREADS(Num_OMP_threads) &
+!$OMP    SCHEDULE(DYNAMIC, 64)  
+!!!!
+do iphi=1,size(nodes_Ashift,1)  ! Loop in the nodal points
+   Ashift=nodes_Ashift(iphi)
+   phicap=A_capphi(nodes_phican(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_dui(iphi)
+   dvi=nodes_dvi(iphi)
+   dwi=nodes_dwi(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xi(Ashift+j)
+      xicell = nodes_pcell(ixi) 
+      iuxicell = cells_ugi(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgi(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgi(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1(Ashift + j)
+         xi1cell = nodes_pcell(ixi1)       
+         iuxi1cell = cells_ugi(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgi(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgi(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             fc(iphi)=fc(iphi)+2.0_DP*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc + &
+              (nodes_ui(ixi)-1)*gow*gov + (nodes_vi(ixi)-1)*gow + nodes_wi(ixi) )*&
+                               f( ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc + &
+              (nodes_ui(ixi1)-1)*gow*gov + (nodes_vi(ixi1)-1)*gow + nodes_wi(ixi1) )*A(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=fc(iphi)/nodes_gwts(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicAPlus_DGV_OMP
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicAPlus_DGVII_OMP(f,fc) 
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+! 
+! This is a copy of the above subroutine, except that it works with secondary meshes and uses OpenMP.
+! This is accomplished by re-naming variable in the USE commvar, only: statement. 
+!
+!
+! The suffix II in the name suggests that the subroutine works with the secondary mesh
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phicanII
+!  nodes_duiII,nodes_dviII,nodes_dwiII,
+!  cells_ugiII,cells_vgiII,cells_wgiII
+!
+! 
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicAPlus_DGVII_OMP(f,fc)
+
+use DGV_commvar, only: AII,A_capphiII,A_xiII,A_xi1II,cells_gouII,cells_govII,cells_gowII,&
+                   grids_cap_uII,grids_cap_vII,grids_cap_wII,nodes_AshiftII,nodes_phicanII,&
+                   nodes_duiII,nodes_dviII,nodes_dwiII,nodes_pcellII,cells_ugiII,cells_vgiII,&
+                   cells_wgiII,nodes_uiII,nodes_viII,nodes_wiII,nodes_gwtsII,Num_OMP_threads
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!! Interface for OpenMP runtime libraries !!!!!!!!!!!!!!!!!!!
+interface 
+ function omp_get_thread_num() result (y)
+   integer :: y 
+ end function omp_get_thread_num
+ function omp_get_num_threads() result (y)
+  integer :: y 
+ end function omp_get_num_threads 
+ function omp_get_num_procs() result (y)
+  integer :: y 
+ end function omp_get_num_procs
+ function omp_get_stack_size () result (y)
+  use nrtype
+  integer (I2B) :: y
+ end function omp_get_stack_size
+end interface  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Initial Allocation of the A-arrays 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gouII(1)
+gov=cells_govII(1)
+gow=cells_gowII(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_uII(1)-1
+pgcv=grids_cap_vII(1)-1
+pgcw=grids_cap_wII(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+! OpenMP
+call omp_set_num_threads(Num_OMP_threads)
+!$OMP PARALLEL DO PRIVATE(dui,dvi,dwi,ixi,xicell,iuxicell,ivxicell,iwxicell, &
+!$OMP    ixi1,xi1cell,iuxi1cell,ivxi1cell,iwxi1cell,Ashift,phicap,j) &
+!$OMP    NUM_THREADS(Num_OMP_threads) &
+!$OMP    SCHEDULE(DYNAMIC, 64)  
+!!!!
+do iphi=1,size(nodes_AshiftII,1)  ! Loop in the nodal points
+   Ashift=nodes_AshiftII(iphi)
+   phicap=A_capphiII(nodes_phicanII(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_duiII(iphi)
+   dvi=nodes_dviII(iphi)
+   dwi=nodes_dwiII(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xiII(Ashift+j)
+      xicell = nodes_pcellII(ixi) 
+      iuxicell = cells_ugiII(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgiII(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgiII(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1II(Ashift + j)
+         xi1cell = nodes_pcellII(ixi1)       
+         iuxi1cell = cells_ugiII(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgiII(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgiII(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             fc(iphi)=fc(iphi)+2.0_DP*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+              (nodes_uiII(ixi)-1)*gow*gov + (nodes_viII(ixi)-1)*gow + nodes_wiII(ixi) )*&
+                               f( ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+&
+              (nodes_uiII(ixi1)-1)*gow*gov + (nodes_viII(ixi1)-1)*gow + nodes_wiII(ixi1) )*AII(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=fc(iphi)/nodes_gwtsII(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicAPlus_DGVII_OMP
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! EvalCollisionPeriodicAPlus_DGVII(f,fc) 
 !
 ! This subroutine assumes a uniform velocity grid and a periodic structure of the 
@@ -261,7 +532,7 @@ end subroutine EvalCollisionPeriodicAPlus_DGV
 ! or close to the center. The value of A_phi can be used to determine which basis function 
 ! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
 ! 
-! This is a copy of the above subroutine, with the only change that it works with secondary mehses. 
+! This is a copy of the above subroutine, but without OpenMP.
 ! This is accomplished by re-naming variable in the USE commvar, only: statement. 
 !
 !
@@ -299,6 +570,8 @@ integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numb
 integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
 integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
 integer :: loc_alloc_stat ! variable to keep the allocation status
+  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Initial Allocation of the A-arrays 
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !
@@ -318,7 +591,7 @@ pgcw=grids_cap_wII(1)-1
 !
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 fc=0 ! nullify the result before computing... 
-!
+
 do iphi=1,size(nodes_AshiftII,1)  ! Loop in the nodal points
    Ashift=nodes_AshiftII(iphi)
    phicap=A_capphiII(nodes_phicanII(iphi))
@@ -346,7 +619,7 @@ do iphi=1,size(nodes_AshiftII,1)  ! Loop in the nodal points
            iwxi1cell = cells_wgiII(xi1cell) + dwi
            if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
              ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
-             fc(iphi)=fc(iphi)+2*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+             fc(iphi)=fc(iphi)+2.0_DP*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
               (nodes_uiII(ixi)-1)*gow*gov + (nodes_viII(ixi)-1)*gow + nodes_wiII(ixi) )*&
                                f( ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+&
               (nodes_uiII(ixi1)-1)*gow*gov + (nodes_viII(ixi1)-1)*gow + nodes_wiII(ixi1) )*AII(Ashift+j)   
@@ -470,11 +743,151 @@ do iphi=1,size(nodes_Ashift,1)  ! Loop in the nodal points
        end if 
       end if 
    end do 
-   fc(iphi)=2*fc(iphi)/nodes_gwts(iphi)
+   fc(iphi)=2.0_DP*fc(iphi)/nodes_gwts(iphi)
    !! The value of the collision integral for velocity node $iphi$ is computed
 end do ! End of the main loop in nodal points
 !
 end subroutine EvalCollisionPeriodicMixedTermsA_DGV
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicMixedTermsA_DGV_OMP (f,fm,fc) 
+!
+! A copy of the above subroutine with OpenMP pragmas added
+!
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+! 
+! This SUBROUTINE IS TO BE USED IN THE DECOMPOSITION MODE when storing derivative is not 
+! feasible. It evaluates the cross term \int\int f_{i} fm_{j} A^{ij}_{k} 
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phican
+!  nodes_dui,nodes_dvi,nodes_dwi,
+!  cells_ugi,cells_vgi,cells_wgi
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicMixedTermsA_DGV_OMP(f,fm,fc)
+
+use DGV_commvar, only: A,A_capphi,A_xi,A_xi1,cells_gou,cells_gov,cells_gow,&
+                   grids_cap_u,grids_cap_v,grids_cap_w,nodes_Ashift,nodes_phican,&
+                   nodes_dui,nodes_dvi,nodes_dwi,nodes_pcell,cells_ugi,cells_vgi,&
+                   cells_wgi,nodes_ui,nodes_vi,nodes_wi,nodes_gwts,Num_OMP_threads
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution-maxwellian at the current time step. 
+real (DP), dimension (:), intent (in) :: fm ! the components of the maxwellian at the current time step.
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: xi1_j,xi_j,j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!! Interface for OpenMP runtime libraries !!!!!!!!!!!!!!!!!!!
+interface 
+ function omp_get_thread_num() result (y)
+   integer :: y 
+ end function omp_get_thread_num
+ function omp_get_num_threads() result (y)
+  integer :: y 
+ end function omp_get_num_threads 
+ function omp_get_num_procs() result (y)
+  integer :: y 
+ end function omp_get_num_procs
+ function omp_get_stack_size () result (y)
+  use nrtype
+  integer (I2B) :: y
+ end function omp_get_stack_size
+end interface  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Initial Allocation of the A-arrays 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+! OpenMP
+call omp_set_num_threads(Num_OMP_threads)
+!$OMP PARALLEL DO PRIVATE(iphi,dui,dvi,dwi,ixi,xicell,iuxicell,ivxicell,iwxicell, &
+!$OMP    ixi1,xi1cell,iuxi1cell,ivxi1cell,iwxi1cell,Ashift,phicap,j,xi_j,xi1_j) &
+!$OMP    NUM_THREADS(Num_OMP_threads) &
+!$OMP    SCHEDULE(DYNAMIC, 64)  
+!!!!
+!
+do iphi=1,size(nodes_Ashift,1)  ! Loop in the nodal points
+   Ashift=nodes_Ashift(iphi)
+   phicap=A_capphi(nodes_phican(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_dui(iphi)
+   dvi=nodes_dvi(iphi)
+   dwi=nodes_dwi(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xi(Ashift+j)
+      xicell = nodes_pcell(ixi) 
+      iuxicell = cells_ugi(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgi(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgi(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1(Ashift + j)
+         xi1cell = nodes_pcell(ixi1)       
+         iuxi1cell = cells_ugi(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgi(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgi(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+                              (nodes_ui(ixi)-1)*gow*gov + (nodes_vi(ixi)-1)*gow + nodes_wi(ixi) 
+             xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+ &
+                              (nodes_ui(ixi1)-1)*gow*gov + (nodes_vi(ixi1)-1)*gow + nodes_wi(ixi1) 
+             fc(iphi)=fc(iphi)+( fm(xi_j)*f(xi1_j) + f(xi_j)*fm(xi1_j) )*A(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=2.0_DP*fc(iphi)/nodes_gwts(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicMixedTermsA_DGV_OMP
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! EvalCollisionPeriodicMixedTermsA_DGVII (f,fm,fc) 
@@ -588,12 +1001,594 @@ do iphi=1,size(nodes_AshiftII,1)  ! Loop in the nodal points
        end if 
       end if 
    end do 
-   fc(iphi)=2*fc(iphi)/nodes_gwtsII(iphi)
+   fc(iphi)=2.0*fc(iphi)/nodes_gwtsII(iphi)
    !! The value of the collision integral for velocity node $iphi$ is computed
 end do ! End of the main loop in nodal points
 !
 end subroutine EvalCollisionPeriodicMixedTermsA_DGVII
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicMixedTermsA_DGVII_OMP (f,fm,fc) 
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+!
+! This is a copy of the above subroutine, with the only change that it works with secondary mehses. 
+! This is accomplished by re-naming variable in the USE commvar, only: statement. 
+!
+!
+! The suffix II in the name suggests that the subroutine works with the secondary mesh
+!
+! This SUBROUTINE IS TO BE USED IN THE DECOMPOSITION MODE when storing derivative is not 
+! feasible. It evaluates the cross term \int\int f_{i} fm_{j} A^{ij}_{k} 
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phicanII
+!  nodes_duiII,nodes_dviII,nodes_dwiII,
+!  cells_ugiII,cells_vgiII,cells_wgiII
+!
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicMixedTermsA_DGVII_OMP(f,fm,fc)
+
+use DGV_commvar, only: AII,A_capphiII,A_xiII,A_xi1II,cells_gouII,cells_govII,cells_gowII,&
+                   grids_cap_uII,grids_cap_vII,grids_cap_wII,nodes_AshiftII,nodes_phicanII,&
+                   nodes_duiII,nodes_dviII,nodes_dwiII,nodes_pcellII,cells_ugiII,cells_vgiII,&
+                   cells_wgiII,nodes_uiII,nodes_viII,nodes_wiII,nodes_gwtsII,Num_OMP_threads
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution-maxwellian at the current time step. 
+real (DP), dimension (:), intent (in) :: fm ! the components of the maxwellian at the current time step.
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: xi1_j,xi_j,j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gouII(1)
+gov=cells_govII(1)
+gow=cells_gowII(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_uII(1)-1
+pgcv=grids_cap_vII(1)-1
+pgcw=grids_cap_wII(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+! OpenMP
+call omp_set_num_threads(Num_OMP_threads)
+!$OMP PARALLEL DO PRIVATE(iphi,dui,dvi,dwi,ixi,xicell,iuxicell,ivxicell,iwxicell, &
+!$OMP    ixi1,xi1cell,iuxi1cell,ivxi1cell,iwxi1cell,Ashift,phicap,j,xi_j,xi1_j) &
+!$OMP    NUM_THREADS(Num_OMP_threads) &
+!$OMP    SCHEDULE(DYNAMIC, 64)  
+!!!!
+do iphi=1,size(nodes_AshiftII,1)  ! Loop in the nodal points
+   Ashift=nodes_AshiftII(iphi)
+   phicap=A_capphiII(nodes_phicanII(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_duiII(iphi)
+   dvi=nodes_dviII(iphi)
+   dwi=nodes_dwiII(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xiII(Ashift+j)
+      xicell = nodes_pcellII(ixi) 
+      iuxicell = cells_ugiII(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgiII(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgiII(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1II(Ashift + j)
+         xi1cell = nodes_pcellII(ixi1)       
+         iuxi1cell = cells_ugiII(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgiII(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgiII(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+                              (nodes_uiII(ixi)-1)*gow*gov + (nodes_viII(ixi)-1)*gow + nodes_wiII(ixi) 
+             xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+ &
+                              (nodes_uiII(ixi1)-1)*gow*gov + (nodes_viII(ixi1)-1)*gow + nodes_wiII(ixi1) 
+             fc(iphi)=fc(iphi)+( fm(xi_j)*f(xi1_j) + f(xi_j)*fm(xi1_j) )*AII(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=2.0_DP*fc(iphi)/nodes_gwtsII(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicMixedTermsA_DGVII_OMP
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicAPlus_DGVII_MPI(f,fc) 
+! 
+! This is a modification of the subroutine to run in parallel MPI implementation
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+! 
+! This is a copy of the above subroutine, but without OpenMP.
+! This is accomplished by re-naming variable in the USE commvar, only: statement. 
+!
+!
+! The suffix II in the name suggests that the subroutine works with the secondary mesh
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phicanII
+!  nodes_duiII,nodes_dviII,nodes_dwiII,
+!  cells_ugiII,cells_vgiII,cells_wgiII
+!
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicAPlus_DGVII_MPI(f,fc)
+
+use DGV_commvar, only: AII,A_capphiII,A_xiII,A_xi1II,cells_gouII,cells_govII,cells_gowII,&
+                   grids_cap_uII,grids_cap_vII,grids_cap_wII,nodes_AshiftII,nodes_phicanII,&
+                   nodes_duiII,nodes_dviII,nodes_dwiII,nodes_pcellII,cells_ugiII,cells_vgiII,&
+                   cells_wgiII,nodes_uiII,nodes_viII,nodes_wiII,nodes_gwtsII,procs_nodes_wldII
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: i,j! scrap counters 
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Initial Allocation of the A-arrays 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gouII(1)
+gov=cells_govII(1)
+gow=cells_gowII(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_uII(1)-1
+pgcv=grids_cap_vII(1)-1
+pgcw=grids_cap_wII(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+do i=1,size(procs_nodes_wldII,1)  ! Loop in the nodal points assigned to this processor
+   iphi=procs_nodes_wldII(i)
+   Ashift=nodes_AshiftII(iphi)
+   phicap=A_capphiII(nodes_phicanII(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_duiII(iphi)
+   dvi=nodes_dviII(iphi)
+   dwi=nodes_dwiII(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xiII(Ashift+j)
+      xicell = nodes_pcellII(ixi) 
+      iuxicell = cells_ugiII(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgiII(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgiII(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1II(Ashift + j)
+         xi1cell = nodes_pcellII(ixi1)       
+         iuxi1cell = cells_ugiII(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgiII(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgiII(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             fc(iphi)=fc(iphi)+2.0_DP*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+              (nodes_uiII(ixi)-1)*gow*gov + (nodes_viII(ixi)-1)*gow + nodes_wiII(ixi) )*&
+                               f( ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+&
+              (nodes_uiII(ixi1)-1)*gow*gov + (nodes_viII(ixi1)-1)*gow + nodes_wiII(ixi1) )*AII(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=fc(iphi)/nodes_gwtsII(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicAPlus_DGVII_MPI
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicAPlus_MPI_DGV (f,fc) 
+!
+! This is an MPI analog of the subroutine. On the master processor, only the collective operation is called. On the slave processor, 
+! the evaluation of the portion of the collision operator is performed. 
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated on one cell. The values on other cells are
+! obtained by a transposition from operator A on the canonical cell --- which should be selected at the 
+! center fot he mesh (or close to the center)
+! 
+!
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicAPlus_MPI_DGV(f,fc)
+
+use DGV_commvar, only: A,A_capphi,A_xi,A_xi1,cells_gou,cells_gov,cells_gow,&
+                   grids_cap_u,grids_cap_v,grids_cap_w,nodes_Ashift,nodes_phican,&
+                   nodes_dui,nodes_dvi,nodes_dwi,nodes_pcell,cells_ugi,cells_vgi,&
+                   cells_wgi,nodes_ui,nodes_vi,nodes_wi,nodes_gwts,procs_nodes_wld
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+integer :: irank ! the number of the process on which the software is running
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+real (DP), dimension (:), allocatable :: fc_buff ! 
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: i,j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+! 
+integer :: ierr ! variables for MPI Calls
+
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+!
+do i=1,size(procs_nodes_wld,1)  ! Loop in the nodal points
+   iphi=procs_nodes_wld(i)
+   Ashift=nodes_Ashift(iphi)
+   phicap=A_capphi(nodes_phican(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_dui(iphi)
+   dvi=nodes_dvi(iphi)
+   dwi=nodes_dwi(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xi(Ashift+j)
+      xicell = nodes_pcell(ixi) 
+      iuxicell = cells_ugi(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgi(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgi(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1(Ashift + j)
+         xi1cell = nodes_pcell(ixi1)       
+         iuxi1cell = cells_ugi(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgi(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgi(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             fc(iphi)=fc(iphi)+2*f( ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+              (nodes_ui(ixi)-1)*gow*gov + (nodes_vi(ixi)-1)*gow + nodes_wi(ixi) )*&
+                               f( ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+&
+              (nodes_ui(ixi1)-1)*gow*gov + (nodes_vi(ixi1)-1)*gow + nodes_wi(ixi1) )*A(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=fc(iphi)/nodes_gwts(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicAPlus_MPI_DGV
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicMixedTermsA_DGVII_MPI (f,fm,fc) 
+!
+! This is a modification of the subroutine EvalCollisionPeriodicMixedTermsA_DGVII 
+! to run in MPI parallel code
+!
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+!
+! This is a copy of the above subroutine, with the only change that it works with secondary mehses. 
+! This is accomplished by re-naming variable in the USE commvar, only: statement. 
+!
+!
+! The suffix II in the name suggests that the subroutine works with the secondary mesh
+!
+! This SUBROUTINE IS TO BE USED IN THE DECOMPOSITION MODE when storing derivative is not 
+! feasible. It evaluates the cross term \int\int f_{i} fm_{j} A^{ij}_{k} 
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phicanII
+!  nodes_duiII,nodes_dviII,nodes_dwiII,
+!  cells_ugiII,cells_vgiII,cells_wgiII
+!
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicMixedTermsA_DGVII_MPI(f,fm,fc)
+
+use DGV_commvar, only: AII,A_capphiII,A_xiII,A_xi1II,cells_gouII,cells_govII,cells_gowII,&
+                   grids_cap_uII,grids_cap_vII,grids_cap_wII,nodes_AshiftII,nodes_phicanII,&
+                   nodes_duiII,nodes_dviII,nodes_dwiII,nodes_pcellII,cells_ugiII,cells_vgiII,&
+                   cells_wgiII,nodes_uiII,nodes_viII,nodes_wiII,nodes_gwtsII,procs_nodes_wldII
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution-maxwellian at the current time step. 
+real (DP), dimension (:), intent (in) :: fm ! the components of the maxwellian at the current time step.
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: xi1_j,xi_j,j,i! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gouII(1)
+gov=cells_govII(1)
+gow=cells_gowII(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_uII(1)-1
+pgcv=grids_cap_vII(1)-1
+pgcw=grids_cap_wII(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+do i=1,size(procs_nodes_wldII,1)  ! Loop in the nodal points assigned to this processor
+   iphi=procs_nodes_wldII(i)
+   Ashift=nodes_AshiftII(iphi)
+   phicap=A_capphiII(nodes_phicanII(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_duiII(iphi)
+   dvi=nodes_dviII(iphi)
+   dwi=nodes_dwiII(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xiII(Ashift+j)
+      xicell = nodes_pcellII(ixi) 
+      iuxicell = cells_ugiII(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgiII(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgiII(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1II(Ashift + j)
+         xi1cell = nodes_pcellII(ixi1)       
+         iuxi1cell = cells_ugiII(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgiII(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgiII(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+                              (nodes_uiII(ixi)-1)*gow*gov + (nodes_viII(ixi)-1)*gow + nodes_wiII(ixi) 
+             xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+ &
+                              (nodes_uiII(ixi1)-1)*gow*gov + (nodes_viII(ixi1)-1)*gow + nodes_wiII(ixi1) 
+             fc(iphi)=fc(iphi)+( fm(xi_j)*f(xi1_j) + f(xi_j)*fm(xi1_j) )*AII(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=2.0_DP*fc(iphi)/nodes_gwtsII(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicMixedTermsA_DGVII_MPI
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalCollisionPeriodicMixedTermsA_DGV_MPI (f,fm,fc) 
+!
+! this is a modification of EvalCollisionPeriodicMixedTermsA_DGV to enable MPI parallel algorithm
+!
+! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+! basis functions. Operator A is only evaluated for one basis function. The values 
+! of A for other basis functions are obtained by a transposition from operator A on 
+! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+! or close to the center. The value of A_phi can be used to determine which basis function 
+! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+! 
+! This SUBROUTINE IS TO BE USED IN THE DECOMPOSITION MODE when storing derivative is not 
+! feasible. It evaluates the cross term \int\int f_{i} fm_{j} A^{ij}_{k} 
+!
+! In addition
+! The subroutine expects that the following specialized variables are prepared: 
+!  nodes_phican
+!  nodes_dui,nodes_dvi,nodes_dwi,
+!  cells_ugi,cells_vgi,cells_wgi
+!
+!!!!!!!!!!!!!
+
+subroutine EvalCollisionPeriodicMixedTermsA_DGV_MPI(f,fm,fc)
+
+use DGV_commvar, only: A,A_capphi,A_xi,A_xi1,cells_gou,cells_gov,cells_gow,&
+                   grids_cap_u,grids_cap_v,grids_cap_w,nodes_Ashift,nodes_phican,&
+                   nodes_dui,nodes_dvi,nodes_dwi,nodes_pcell,cells_ugi,cells_vgi,&
+                   cells_wgi,nodes_ui,nodes_vi,nodes_wi,nodes_gwts,procs_nodes_wld
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution-maxwellian at the current time step. 
+real (DP), dimension (:), intent (in) :: fm ! the components of the maxwellian at the current time step.
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+integer (I4B) :: iphi,ixi,ixi1 ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: xi1_j,xi_j,j,i! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: Ashift,phicap ! scrap variables. Ashift is to keep the address of the cell rigth before records in A that correspond to basis function phi. 
+                               ! phicap keeps the number of records in A for the basis function phi
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: zz,xicell, xi1cell !indices of the cellscontaining xi and xi1
+integer :: loc_alloc_stat ! variable to keep the allocation status
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! main loop: prepare the dummy arrays, then evaluate the collision integral by contracting with a portion of A.
+!!!!!!!!!!!!!!!!!
+!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+!
+do i=1,size(procs_nodes_wld,1)  ! Loop in the nodal points
+   iphi=procs_nodes_wld(i)
+   Ashift=nodes_Ashift(iphi)
+   phicap=A_capphi(nodes_phican(iphi))
+   ! Need to allocate some scrap arrays:
+   !!!!!!!!!!!!!!!!!
+   dui=nodes_dui(iphi)
+   dvi=nodes_dvi(iphi)
+   dwi=nodes_dwi(iphi)
+   !!
+   do j=1,phicap
+      ixi = A_xi(Ashift+j)
+      xicell = nodes_pcell(ixi) 
+      iuxicell = cells_ugi(xicell) + dui
+      if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+       ivxicell = cells_vgi(xicell) + dvi
+       if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+        iwxicell = cells_wgi(xicell) + dwi
+        if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+         ixi1 = A_xi1(Ashift + j)
+         xi1cell = nodes_pcell(ixi1)       
+         iuxi1cell = cells_ugi(xi1cell) + dui
+         if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+          ivxi1cell = cells_vgi(xi1cell) + dvi
+          if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+           iwxi1cell = cells_wgi(xi1cell) + dwi
+           if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+             ! Now that we know that both shifts were successfull, we set prepare both fxi and fxi1 and aphi records
+             xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc+&
+                              (nodes_ui(ixi)-1)*gow*gov + (nodes_vi(ixi)-1)*gow + nodes_wi(ixi) 
+             xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc+ &
+                              (nodes_ui(ixi1)-1)*gow*gov + (nodes_vi(ixi1)-1)*gow + nodes_wi(ixi1) 
+             fc(iphi)=fc(iphi)+( fm(xi_j)*f(xi1_j) + f(xi_j)*fm(xi1_j) )*A(Ashift+j)   
+             !
+           end if
+          end if  
+         end if 
+        end if 
+       end if 
+      end if 
+   end do 
+   fc(iphi)=2.0_DP*fc(iphi)/nodes_gwts(iphi)
+   !! The value of the collision integral for velocity node $iphi$ is computed
+end do ! End of the main loop in nodal points
+!
+end subroutine EvalCollisionPeriodicMixedTermsA_DGV_MPI
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! EvalCollisionLinear(f,fc) 
@@ -824,22 +1819,22 @@ do iphi=1,size(nodes_gwts,1)  ! Loop in the nodal points. Collision operator nee
    k = AkorAllNets_k(curr_net)%p(j) ! this is the number of the Korobov node for 
    frac_part = Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP) 
-   xiu = (frac_part - 0.5_DP)*(u_R-u_L)+(u_R+u_L)/2.0_DP 
+   xiu = frac_part*(u_R-u_L) + u_L 
    frac_part = Real( (korob_net_param(3)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(3)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
-   xiv = (frac_part - 0.5_DP)*(v_R-v_L)+(v_R+v_L)/2.0_DP 
+   xiv = frac_part*(v_R-v_L) + v_L
    frac_part = Real( (korob_net_param(4)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(4)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
-   xiw = (frac_part - 0.5_DP)*(w_R-w_L)+(w_R+w_L)/2.0_DP 
+   xiw = frac_part*(w_R-w_L) + w_L 
    frac_part = Real( (korob_net_param(5)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(5)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
-   xi1u = (frac_part - 0.5_DP)*(u_R-u_L)+(u_R+u_L)/2.0_DP 
+   xi1u = frac_part*(u_R-u_L) + u_L
    frac_part = Real( (korob_net_param(6)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(6)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
-   xi1v = (frac_part - 0.5_DP)*(v_R-v_L)+(v_R+v_L)/2.0_DP 
+   xi1v = frac_part*(v_R-v_L) + v_L
    frac_part = Real( (korob_net_param(7)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
           Real(FLOOR(( Real((korob_net_param(7)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
-   xi1w = (frac_part - 0.5_DP)*(w_R-w_L)+(w_R+w_L)/2.0_DP 
+   xi1w = frac_part*(w_R-w_L) + w_L 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    !!! now we need to shift velocity point to take into account the use of shift in the canonical function
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
@@ -862,13 +1857,272 @@ do iphi=1,size(nodes_gwts,1)  ! Loop in the nodal points. Collision operator nee
    fval1 = EvalSolVeloPtCellFast_DGV(f,xi1u,xi1v,xi1w,pcn1)
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    !!! Add the new value to the integral
-   fc(iphi) = fc(iphi)+fval*fval1*AkorAllNets(curr_net)%p(Akorshift+j)   
+   fc(iphi) = fc(iphi) + fval*fval1*AkorAllNets(curr_net)%p(Akorshift+j)   
   end do 
-  fc(iphi)=fc(iphi)/nodes_gwts(iphi) ! the 1/P weight to put in front of the Korbov quadrature  
+  fc(iphi)=fc(iphi)/nodes_gwts(iphi) ! Add 8/Delta v^{j} / \omega_{i}  
    !! The value of the collision integral for velocity node $iphi$ is computed
 end do ! End of the main loop in nodal points
 !!
 end subroutine EvalCollisionPeriodicAKor_DGV
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! EvalCollisionPeriodicAKorOpt_DGV (f,fc) 
+!!
+!! This is a version of the above subroutine with summations rearranged tryting to 
+!! achieve optimaltiy 
+!!
+!!! This subroutine is to evaluate the bilinear collision operator using Korobov quadratures.
+!!
+!! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+!! basis functions. Operator Akor is only evaluated for one basis function. The values 
+!! of A for other basis functions are obtained by a transposition from operator A on 
+!! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+!! or close to the center. The value of Akor_phi can be used to determine which basis function 
+!! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+!! 
+!! This subroutine depends on a number of arrays that need to be prepared before the first time step. 
+!! Specifically nodes_phicanII
+!!  nodes_duiII,nodes_dviII,nodes_dwiII,nodes_phican
+!!  cells_ugiII,cells_vgiII,cells_wgiII
+!! and  
+!!  AkorAllNets_shift 
+!! need to be prepared. 
+!! To set up the first bunch, call SetCellsUGI_DGV
+!! To set up the second bunch, call ...
+!! 
+!!
+!!!!!!!!!!!!!!!
+!
+subroutine EvalCollisionPeriodicAKorOpt_DGV(f,fc) 
+!
+use DGV_commvar, only: nodes_phican,nodes_dui,nodes_dvi,nodes_dwi,nodes_gwts, &
+                       AkorAllNets, AkorAllNets_k, AkorAllNets_phi, AkorAllNets_capphi,&
+                       korob_net_paramAllNets, nodes_AkorshiftAllNets,numKornets, &
+                       u_L,u_R,v_L,v_R,w_L,w_R,g_nds_all, &
+                       cells_ru,cells_lu,cells_rv,cells_lv,cells_rw,cells_lw,&
+                       grids_cap_u,grids_cap_v,grids_cap_w, &
+                       cells_gou,cells_gov,cells_gow,&
+                       nodes_pcell
+                       
+use DGV_dgvtools_mod                       
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+integer (I4B) :: iphi ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: AkorNrecs,n_ijl,xi_j,xi1_j,ni,nj,nl,n1i,n1j,n1l ! scrap variables to keep addresses of cells where the velocity point falls
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ii,jj,ll,ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: k ! index of the korobov node
+integer :: loc_alloc_stat ! variable to keep the allocation status
+integer :: num_nets, curr_net ! a scrap variable to keep the number of all Korobov nets and the number fo the net that is used
+real :: harvest ! a scrap variable
+real (DP) :: frac_part,xiu,xiv,xiw,xi1u,xi1v,xi1w,du,dv,dw,fxi,fxi1,Akor_val ! scrap variables
+real (DP), dimension(:), allocatable :: lagrarry, lagrarry1 
+integer (I4B), dimension (7) :: korob_net_param ! scrap variable to keep the korobov parameters.
+logical :: outsidedomain, outsidedomain1
+real (DP) :: piunor, pjvnor, plwnor,unor,wnor,vnor !scrap values  
+integer (I4B) :: pcn, phican ! scrap indices to keep numbers of cell for korobov points, and sracp to keep the index of the basis function 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+num_nets = numKornets ! detemine the number of nets
+!!!!!!!!!!!!!!!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!!!!!!!!!!!!!!!
+du=cells_ru(1)-cells_lu(1) ! the mesh is assumed uniform. Therefore values obtained from the 
+dv=cells_rv(1)-cells_lv(1) ! first cell can be used for all cells 
+dw=cells_rw(1)-cells_lw(1) !
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+!!!!!!!!!!!!
+!!! call RANDOM_SEED ! prepare the random number generator -- refresh the seed vector
+!!!!!!!!!!!!
+!call RANDOM_NUMBER(harvest)
+!if (harvest >= 1.0D0) then !!! to avoid the result harvest  = 1 for sure
+! harvest = .999 
+!end if
+!curr_net = int(harvest*Real(num_nets))+1 ! randomly select the net from 1...num_nets available nets (all supplied nets must be about the same accuracy...)
+!!!  Override the above ...
+curr_net = 1
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+korob_net_param = korob_net_paramAllNets(curr_net)%p          ! save the parameters of the Korobov net into a temp array
+!!! determine the total number of records in the entire Akor array:
+AkorNrecs = size(AkorAllNets(curr_net)%p,1)
+if (AkorNrecs /= sum(AkorAllNets_capphi(curr_net)%p)) then 
+ print *,"EvalCollisionPeriodicAKorOpt_DGV: possible data error. Length of Akor not equal sum(Akor_capphi)" 
+ stop 
+end if
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+allocate (lagrarry(1:gou*gov*gow),lagrarry1(1:gou*gov*gow), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then 
+ print *, "EvalCollisionPeriodicAKorOpt_DGV: Error allocation arrays (largarray,lagrarry1)"
+ stop
+end if 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+do j=1,AkorNrecs  ! select  a record from the pre-computed Akor array
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !  Determine the two velocity vectors that correspond to this record 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ Akor_val = AkorAllNets(curr_net)%p(j)
+ k = AkorAllNets_k(curr_net)%p(j) ! this is the number of the Korobov node for 
+ frac_part = Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP) 
+ xiu = frac_part*(u_R-u_L) + u_L 
+ frac_part = Real( (korob_net_param(3)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(3)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xiv = frac_part*(v_R-v_L) + v_L
+ frac_part = Real( (korob_net_param(4)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(4)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xiw = frac_part*(w_R-w_L) + w_L 
+ frac_part = Real( (korob_net_param(5)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(5)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1u = frac_part*(u_R-u_L) + u_L
+ frac_part = Real( (korob_net_param(6)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(6)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1v = frac_part*(v_R-v_L) + v_L
+ frac_part = Real( (korob_net_param(7)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(7)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1w = frac_part*(w_R-w_L) + w_L  
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! For selected Korbobov node find were velocities fall on the uniform velocity grid  (not going to work on non-uniforom grids)
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ outsidedomain = .false. 
+ call QuickCellFindUniformGridIJL_DGV(xiu,xiv,xiw,ni,nj,nl,outsidedomain) ! we locate the cell that contains (xiu,xiv,xiw)
+ outsidedomain1 = .false.                                ! if the velocity value outside domain, return 
+ call QuickCellFindUniformGridIJL_DGV(xi1u,xi1v,xi1w,n1i,n1j,n1l,outsidedomain1) ! outsidedomain = .true.
+ if (outsidedomain .or. outsidedomain1) then 
+  print *,"EvalCollisionPeriodicAKorOpt_DGV: data error. Akor contains recs for nodes outside the vel. dom."
+  stop  ! points that are outside of the mesh -- must be an error in data or a wrong velocity domain. 
+ end if 
+ !!! now we know local coordinates of cells where falls the selected korbov velocity node.    
+ !!! Next find local coordinates of the canonical basis function for this records
+ phican = AkorAllNets_phi(curr_net)%p(j) ! number of the basis function for which entry of Akor was computed 
+ !!!! Now we prepare for interpolation of the solution on the shifted korobov nodes... 
+ !!! first triple of the node: 
+ !!! compute the number of the cell where the node belongs
+ pcn = (ni-1)*pgcw*pgcv + (nj-1)*pgcw + nl
+ !!! Next we evaluate nodal DG basis fucntion on the cell where the velocities fall. We evaluate then at every nodal point in 
+ !!! velcity on that cell and save in an array. This array will be used to later to interpolate the value of the function 
+ !!! on each cell. The algorithm depends on the fact that the velocity grid is uniform.   
+ unor = (xiu - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+ vnor = (xiv - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+ wnor = (xiw - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+ ! basis function for that node and add it to the interpolated value
+ lagrarry=0
+ n_ijl = 1
+ do ii=1,gou
+  piunor = lagrbasfun(ii,unor,g_nds_all(:gou,gou))
+  do jj=1,gov
+   pjvnor = lagrbasfun(jj,vnor,g_nds_all(:gov,gov))
+   do ll=1,gow 
+    ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+    ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+    plwnor = lagrbasfun(ll,wnor,g_nds_all(:gow,gow))
+    ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+    lagrarry(n_ijl) = piunor*pjvnor*plwnor
+    n_ijl = n_ijl+1
+   enddo
+  enddo 
+ enddo  
+ !!! second triple of the Korobov node: 
+ !!! compute the number of the cell where the node belongs
+ pcn = (n1i-1)*pgcw*pgcv + (n1j-1)*pgcw + n1l
+ !!! Next we evaluate nodal DG basis fucntion on the cell where the velocities fall. We evaluate then at every nodal point in 
+ !!! velcity on that cell and save in an array. This array will be used to later to interpolate the value of the function 
+ !!! on each cell. The algorithm depends on the fact that the velocity grid is uniform.   
+ unor = (xiu - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+ vnor = (xiv - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+ wnor = (xiw - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+ ! basis function for that node and add it to the interpolated value
+ lagrarry1=0
+ n_ijl = 1
+ do ii=1,gou
+  piunor = lagrbasfun(ii,unor,g_nds_all(:gou,gou))
+  do jj=1,gov
+   pjvnor = lagrbasfun(jj,vnor,g_nds_all(:gov,gov))
+   do ll=1,gow 
+    ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+    ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+    plwnor = lagrbasfun(ll,wnor,g_nds_all(:gow,gow))
+    ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+    lagrarry1(n_ijl) = piunor*pjvnor*plwnor
+    n_ijl = n_ijl+1
+   enddo
+  enddo 
+ enddo  
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! We are ready to add this integration node to the collision integral 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!
+ do iphi=1,size(nodes_gwts,1)  ! Loop in the nodal points. Collision operator needs to be evaluated at each node
+   if (nodes_phican(iphi) == phican) then  !(only proceed with evaluation if this node correspond to this canonical basis function 
+    !!!!!!!!!!!!!!!!!
+    ! Get grid displacements if cell where iphi belongs from the canoncal cell 
+    !!!!!!!!!!!!!!!!!
+    dui = nodes_dui(iphi) ! We assume that all Korobov nets are obtained for the same velocity discretization. 
+    dvi = nodes_dvi(iphi) ! and use the same canonical cell. Otherwise, different nets will require different arrays    
+    dwi = nodes_dwi(iphi) ! nodes_dwi
+    !!!!!!!!!!!!!!!!
+    ! now we add the shift component by component to the velocity and verify that this shift does not 
+    ! through use outside fo the veloicity domain 
+    iuxicell = ni + dui
+    if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+     ivxicell = nj + dvi
+     if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+      iwxicell = nl + dwi
+      if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+       iuxi1cell = n1i + dui
+       if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+        ivxi1cell = n1j + dvi
+        if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+         iwxi1cell = n1l + dwi
+         if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+            ! Now that we know that both shifts were successfull, we set prepare both f(xi) and f(xi1) 
+            ! and add record to the collision integral
+            xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc
+            xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc
+            fxi = sum(f(xi_j+1 : xi_j+dofc)*lagrarry)
+            fxi1 = sum(f(xi1_j+1 : xi1_j+dofc)*lagrarry1)
+            fc(iphi)=fc(iphi) + fxi*fxi1*Akor_val
+            !
+         end if
+        end if  
+       end if 
+      end if 
+     end if 
+    end if
+   !    
+  end if
+ !
+ end do ! end loop in velocity nodes
+!!!!
+end do ! end loop in Akor records 
+!!!!
+fc=fc/nodes_gwts ! Add 8/Delta v^{j} / \omega_{i}  
+!!
+deallocate(lagrarry)
+!
+end subroutine EvalCollisionPeriodicAKorOpt_DGV
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !! EvalCollisionPeriodicAKorMixedTerms_DGV (f,fm,fc) 
@@ -1016,6 +2270,269 @@ end do ! End of the main loop in nodal points
 end subroutine EvalCollisionPeriodicAKorMixedTerms_DGV
 
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! EvalCollisionPeriodicAKorMxdTms_DGV (f,fc) 
+!!
+!! This is a version of the above subroutine with summations rearranged tryting to 
+!! achieve optimaltiy 
+!!
+!!! This subroutine is to evaluate the bilinear collision operator using Korobov quadratures.
+!!
+!! This subroutine assumes a uniform velocity grid and a periodic structure of the 
+!! basis functions. Operator Akor is only evaluated for one basis function. The values 
+!! of A for other basis functions are obtained by a transposition from operator A on 
+!! the canonical cell. (The canonical cell should be selected at the center of the mesh 
+!! or close to the center. The value of Akor_phi can be used to determine which basis function 
+!! can be used a s the canonical. However, it is best to maintain proper record on how Akor was computed.)
+!! 
+!! This subroutine depends on a number of arrays that need to be prepared before the first time step. 
+!! Specifically nodes_phicanII
+!!  nodes_duiII,nodes_dviII,nodes_dwiII,nodes_phican
+!!  cells_ugiII,cells_vgiII,cells_wgiII
+!! and  
+!!  AkorAllNets_shift 
+!! need to be prepared. 
+!! To set up the first bunch, call SetCellsUGI_DGV
+!! To set up the second bunch, call ...
+!! 
+!!
+!!!!!!!!!!!!!!!
+!
+subroutine EvalCollisionPeriodicAKorMxdTmsOpt_DGV(f,fm,fc) 
+!
+use DGV_commvar, only: nodes_phican,nodes_dui,nodes_dvi,nodes_dwi,nodes_gwts, &
+                       AkorAllNets, AkorAllNets_k, AkorAllNets_phi, AkorAllNets_capphi,&
+                       korob_net_paramAllNets, nodes_AkorshiftAllNets,numKornets, &
+                       u_L,u_R,v_L,v_R,w_L,w_R,g_nds_all, &
+                       cells_ru,cells_lu,cells_rv,cells_lv,cells_rw,cells_lw,&
+                       grids_cap_u,grids_cap_v,grids_cap_w, &
+                       cells_gou,cells_gov,cells_gow,&
+                       nodes_pcell
+                       
+use DGV_dgvtools_mod                       
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+real (DP), dimension (:), intent (in) :: f ! the components of the solution at the current time step. 
+real (DP), dimension (:), intent (in) :: fm ! the local maxwellian
+real (DP), dimension (:), intent (out) :: fc ! the value of the collision operator for each component of the solution.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+integer (I4B) :: iphi ! the index of the basis function and nodes
+integer (I4B) :: gou,gov,gow,dofc ! are the numbers of nodal points in each cell in directions u,v and w. Dofc=all degrees o f freedom on one cell
+integer (I4B) :: j! scrap counters
+integer (I4B) :: pgcu,pgcv,pgcw ! number of cells on the grid (we assume that there is only one uniform grid
+integer (I4B) :: AkorNrecs,n_ijl,xi_j,xi1_j,ni,nj,nl,n1i,n1j,n1l ! scrap variables to keep addresses of cells where the velocity point falls
+integer (I4B) :: dui,dvi,dwi ! integer displacements from the cell where iphi is to the cell of the canonical node
+integer (I4B) :: iuxicell,ivxicell,iwxicell,iuxi1cell,ivxi1cell,iwxi1cell ! numbers of the cell for translated xi and xi1
+integer (I4B) :: ii,jj,ll,ixicell,ixi1cell ! indices of the nodes xi and xi1                                
+integer (I4B) :: k ! index of the korobov node
+integer :: loc_alloc_stat ! variable to keep the allocation status
+integer :: num_nets, curr_net ! a scrap variable to keep the number of all Korobov nets and the number fo the net that is used
+real :: harvest ! a scrap variable
+real (DP) :: frac_part,xiu,xiv,xiw,xi1u,xi1v,xi1w,du,dv,dw ! scrap variables
+real (DP) :: fxi,fxi1,fmxi,fmxi1,Akor_val ! scrap variables
+real (DP), dimension(:), allocatable :: lagrarry, lagrarry1 
+integer (I4B), dimension (7) :: korob_net_param ! scrap variable to keep the korobov parameters.
+logical :: outsidedomain, outsidedomain1
+real (DP) :: piunor, pjvnor, plwnor,unor,wnor,vnor !scrap values  
+integer (I4B) :: pcn, phican ! scrap indices to keep numbers of cell for korobov points, and sracp to keep the index of the basis function 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+num_nets = numKornets ! detemine the number of nets
+!!!!!!!!!!!!!!!
+! IMPORTANT: We assume that all cells are identical, in particular that they have the same number of nodes in each dimension
+!!!!!!!!!!!!!!!
+du=cells_ru(1)-cells_lu(1) ! the mesh is assumed uniform. Therefore values obtained from the 
+dv=cells_rv(1)-cells_lv(1) ! first cell can be used for all cells 
+dw=cells_rw(1)-cells_lw(1) !
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+gou=cells_gou(1)
+gov=cells_gov(1)
+gow=cells_gow(1)
+dofc=gou*gov*gow
+! IMPORTANT: We also assume that there is only one grid! 
+pgcu=grids_cap_u(1)-1
+pgcv=grids_cap_v(1)-1
+pgcw=grids_cap_w(1)-1
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+fc=0 ! nullify the result before computing... 
+!!!!!!!!!!!!
+!!! call RANDOM_SEED ! prepare the random number generator -- refresh the seed vector
+!!!!!!!!!!!!
+!call RANDOM_NUMBER(harvest)
+!if (harvest >= 1.0D0) then !!! to avoid the result harvest  = 1 for sure
+! harvest = .999 
+!end if
+!curr_net = int(harvest*Real(num_nets))+1 ! randomly select the net from 1...num_nets available nets (all supplied nets must be about the same accuracy...)
+!!!  Override the above ...
+curr_net = 1
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+korob_net_param = korob_net_paramAllNets(curr_net)%p          ! save the parameters of the Korobov net into a temp array
+!!! determine the total number of records in the entire Akor array:
+AkorNrecs = size(AkorAllNets(curr_net)%p,1)
+if (AkorNrecs /= sum(AkorAllNets_capphi(curr_net)%p)) then 
+ print *,"EvalCollisionPeriodicAKorOpt_DGV: possible data error. Length of Akor not equal sum(Akor_capphi)" 
+ stop 
+end if
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+allocate (lagrarry(1:gou*gov*gow),lagrarry1(1:gou*gov*gow), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then 
+ print *, "EvalCollisionPeriodicAKorOpt_DGV: Error allocation arrays (largarray,lagrarry1)"
+ stop
+end if 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+do j=1,AkorNrecs  ! select  a record from the pre-computed Akor array
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !  Determine the two velocity vectors that correspond to this record 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ Akor_val = AkorAllNets(curr_net)%p(j)
+ k = AkorAllNets_k(curr_net)%p(j) ! this is the number of the Korobov node for 
+ frac_part = Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(2)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP) 
+ xiu = frac_part*(u_R-u_L) + u_L 
+ frac_part = Real( (korob_net_param(3)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(3)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xiv = frac_part*(v_R-v_L) + v_L
+ frac_part = Real( (korob_net_param(4)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(4)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xiw = frac_part*(w_R-w_L) + w_L 
+ frac_part = Real( (korob_net_param(5)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(5)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1u = frac_part*(u_R-u_L) + u_L
+ frac_part = Real( (korob_net_param(6)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(6)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1v = frac_part*(v_R-v_L) + v_L
+ frac_part = Real( (korob_net_param(7)*k) ,DP)/Real(korob_net_param(1),DP)  - & 
+        Real(FLOOR(( Real((korob_net_param(7)*k),DP)/Real(korob_net_param(1),DP) ),I4B),DP)
+ xi1w = frac_part*(w_R-w_L) + w_L  
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! For selected Korbobov node find were velocities fall on the uniform velocity grid  (not going to work on non-uniforom grids)
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ outsidedomain = .false. 
+ call QuickCellFindUniformGridIJL_DGV(xiu,xiv,xiw,ni,nj,nl,outsidedomain) ! we locate the cell that contains (xiu,xiv,xiw)
+ outsidedomain1 = .false.                                ! if the velocity value outside domain, return 
+ call QuickCellFindUniformGridIJL_DGV(xi1u,xi1v,xi1w,n1i,n1j,n1l,outsidedomain1) ! outsidedomain = .true.
+ if (outsidedomain .or. outsidedomain1) then 
+  print *,"EvalCollisionPeriodicAKorOpt_DGV: data error. Akor contains recs for nodes outside the vel. dom."
+  stop  ! points that are outside of the mesh -- must be an error in data or a wrong velocity domain. 
+ end if 
+ !!! now we know local coordinates of cells where falls the selected korbov velocity node.    
+ !!! Next find local coordinates of the canonical basis function for this records
+ phican = AkorAllNets_phi(curr_net)%p(j) ! number of the basis function for which entry of Akor was computed 
+ !!!! Now we prepare for interpolation of the solution on the shifted korobov nodes... 
+ !!! first triple of the node: 
+ !!! compute the number of the cell where the node belongs
+ pcn = (ni-1)*pgcw*pgcv + (nj-1)*pgcw + nl
+ !!! Next we evaluate nodal DG basis fucntion on the cell where the velocities fall. We evaluate then at every nodal point in 
+ !!! velcity on that cell and save in an array. This array will be used to later to interpolate the value of the function 
+ !!! on each cell. The algorithm depends on the fact that the velocity grid is uniform.   
+ unor = (xiu - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+ vnor = (xiv - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+ wnor = (xiw - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+ ! basis function for that node and add it to the interpolated value
+ lagrarry=0
+ n_ijl = 1
+ do ii=1,gou
+  piunor = lagrbasfun(ii,unor,g_nds_all(:gou,gou))
+  do jj=1,gov
+   pjvnor = lagrbasfun(jj,vnor,g_nds_all(:gov,gov))
+   do ll=1,gow 
+    ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+    ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+    plwnor = lagrbasfun(ll,wnor,g_nds_all(:gow,gow))
+    ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+    lagrarry(n_ijl) = piunor*pjvnor*plwnor
+    n_ijl = n_ijl+1
+   enddo
+  enddo 
+ enddo  
+ !!! second triple of the Korobov node: 
+ !!! compute the number of the cell where the node belongs
+ pcn = (n1i-1)*pgcw*pgcv + (n1j-1)*pgcw + n1l
+ !!! Next we evaluate nodal DG basis fucntion on the cell where the velocities fall. We evaluate then at every nodal point in 
+ !!! velcity on that cell and save in an array. This array will be used to later to interpolate the value of the function 
+ !!! on each cell. The algorithm depends on the fact that the velocity grid is uniform.   
+ unor = (xiu - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+ vnor = (xiv - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+ wnor = (xiw - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+ ! basis function for that node and add it to the interpolated value
+ lagrarry1=0
+ n_ijl = 1
+ do ii=1,gou
+  piunor = lagrbasfun(ii,unor,g_nds_all(:gou,gou))
+  do jj=1,gov
+   pjvnor = lagrbasfun(jj,vnor,g_nds_all(:gov,gov))
+   do ll=1,gow 
+    ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+    ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+    plwnor = lagrbasfun(ll,wnor,g_nds_all(:gow,gow))
+    ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+    lagrarry1(n_ijl) = piunor*pjvnor*plwnor
+    n_ijl = n_ijl+1
+   enddo
+  enddo 
+ enddo  
+ !!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! We are ready to add this integration node to the collision integral 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!
+ do iphi=1,size(nodes_gwts,1)  ! Loop in the nodal points. Collision operator needs to be evaluated at each node
+   if (nodes_phican(iphi) == phican) then  !(only proceed with evaluation if this node correspond to this canonical basis function 
+    !!!!!!!!!!!!!!!!!
+    ! Get grid displacements if cell where iphi belongs from the canoncal cell 
+    !!!!!!!!!!!!!!!!!
+    dui = nodes_dui(iphi) ! We assume that all Korobov nets are obtained for the same velocity discretization. 
+    dvi = nodes_dvi(iphi) ! and use the same canonical cell. Otherwise, different nets will require different arrays    
+    dwi = nodes_dwi(iphi) ! nodes_dwi
+    !!!!!!!!!!!!!!!!
+    ! now we add the shift component by component to the velocity and verify that this shift does not 
+    ! through use outside fo the veloicity domain 
+    iuxicell = ni + dui
+    if ((iuxicell >= 1) .and. (iuxicell <= pgcu)) then ! check if xi outside of bounds in u
+     ivxicell = nj + dvi
+     if ((ivxicell >= 1) .and. (ivxicell <= pgcv)) then ! check if xi outside of bounds in v 
+      iwxicell = nl + dwi
+      if ((iwxicell >= 1) .and. (iwxicell <= pgcw)) then ! check if xi outside of bounds in w	
+       iuxi1cell = n1i + dui
+       if ((iuxi1cell >= 1) .and. (iuxi1cell <= pgcu)) then ! check if xi1 outside of bounds in u
+        ivxi1cell = n1j + dvi
+        if ((ivxi1cell >= 1) .and. (ivxi1cell <= pgcv)) then ! check if xi1 outside of bounds in v 
+         iwxi1cell = n1l + dwi
+         if ((iwxi1cell >= 1) .and. (iwxi1cell <= pgcw)) then ! check if xi1 outside of bounds in w	
+            ! Now that we know that both shifts were successfull, we set prepare both f(xi) and f(xi1) 
+            ! and add record to the collision integral
+            xi_j = ((iuxicell-1)*pgcw*pgcv + (ivxicell-1)*pgcw + iwxicell-1)*dofc
+            xi1_j = ((iuxi1cell-1)*pgcw*pgcv + (ivxi1cell-1)*pgcw + iwxi1cell-1)*dofc
+            fxi = sum(f(xi_j+1 : xi_j+dofc)*lagrarry)
+            fmxi = sum(fm(xi_j+1 : xi_j+dofc)*lagrarry)
+            fxi1 = sum(f(xi1_j+1 : xi1_j+dofc)*lagrarry1)
+            fmxi1 = sum(fm(xi1_j+1 : xi1_j+dofc)*lagrarry1)
+            fc(iphi)=fc(iphi) + (fxi*fmxi1+fmxi*fxi1)*Akor_val
+            !
+         end if
+        end if  
+       end if 
+      end if 
+     end if 
+    end if
+   !    
+  end if
+ !
+ end do ! end loop in velocity nodes
+!!!!
+end do ! end loop in Akor records 
+!!!!
+fc=fc/nodes_gwts ! Add 8/Delta v^{j} / \omega_{i}  
+!!
+deallocate(lagrarry)
+!
+end subroutine EvalCollisionPeriodicAKorMxdTmsOpt_DGV
+
+
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! Right hand side calculation for the ES-BGK distribution and collision operator
 ! Here, the RHS = nu * (f0 - f)
@@ -1083,6 +2600,7 @@ RHS = nu * (f0 - f)
 deallocate (f0)
 !
 end subroutine EvalColESBGK
+
 
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1265,14 +2783,14 @@ if ((mom_L1>Mom_trshld) .and. (momsrates_reliab)) then
  end if
  !!!!!!!!!!!!! DIAGNOSTICK for PRAKASH !!!!!!!!! save values of Cco into global variable REMOVE later
   Cco=Cco_temp 
-  !!!!!!!!!!!!! END DIAGNOSTIC !!!!!!!!!!!!!!!
+ !!!!!!!!!!!!! END DIAGNOSTIC !!!!!!!!!!!!!!!
  call getnu(nu,Cco_temp,nodes_u,nodes_v,nodes_w,nuBolt) ! psi (nu)   
  ! finally, we get the RHS
  fcol = -nuBolt*Df
  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
  !! DIAGNOSTICS  
  ! do i=1,size(nuBolt,1)
- !  nuBolt(i) = max(nuBolt(i),0.0d0)
+ !  nuBolt(i) = maxval(nuBolt(i),0.0d0)
  ! end do 
  min_nu = minval(nuBolt) 
  max_nu = maxval(nuBolt)
@@ -1490,6 +3008,1012 @@ end if
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 end subroutine EvalColVelES1Donecell
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColRelES(f,Df,fcol,time)
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T
+!
+! 
+!
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColRelES(f,Df,fcol,time)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w, &
+                   !!!!! Diagnostic ADDED THIS TO save the coefficinets on file. Later remove! 
+                   Cco 
+                   !!!!! END DIAGNOSTIC 
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: Theta, Theta_inv ! scrap variable to keep the artificial stress tensor and its inverse 
+real (DP), dimension(1:6) :: scrtheta ! 
+real (DP), dimension(1:6) :: fij_arr, dfij_arr !Just used to capture the fij and dfij in the bugger to copy over to excel.
+real (DP) :: fij, dfij,dens ! scrap variables
+! 
+real (DP) :: mom_L1 ! scrap variable to keep L1-norm of matrix Mom
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+real (DP), parameter :: Mom_trshld = 1.0d-8 ! This constant determines when the coefficents are updated in the velocity dependent collisio nfrequency. 
+                     ! if \| Mom \|_{L1}> Mom_trshld then the coefficients are updated. Otherwise, the "fall back" model is used.  
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar ! scrap variables to keep the values of the local bulk velocity
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates0D_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab) ! the subroutine returns moment relaxation rates
+											! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  
+ dens=sum(f*nodes_gwts)
+ do i=1,6
+   dfij = sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij = sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij_arr(i) = fij
+   dfij_arr(i) = dfij
+   scrtheta(i) = (fij - (momsrates(i)/nu)*dfij)*2.0_DP/dens
+ end do 
+ ! now the components of artificial stress tensor have been computed. We will transfer the values into the artificial stress tensor
+ Theta(1,1) = scrtheta(1)
+ Theta(2,2) = scrtheta(2)
+ Theta(3,3) = scrtheta(3)
+ Theta(2,1) = scrtheta(4)
+ Theta(1,2) = scrtheta(4)
+ Theta(3,1) = scrtheta(5)
+ Theta(1,3) = scrtheta(5)
+ Theta(3,2) = scrtheta(6)
+ Theta(2,3) = scrtheta(6)
+ ! we have got the artificial stress tensor set up 
+ Theta_inv = inv(Theta) ! get the inverse of the moments matrix
+ !!!!!!!!!!!!!!!!!!
+ fij = Theta(1,1)*Theta(2,2)*Theta(3,3)+Theta(2,1)*Theta(3,2)*Theta(1,3)+Theta(3,1)*Theta(1,2)*Theta(2,3) - &
+       Theta(1,3)*Theta(2,2)*Theta(3,1)-Theta(2,3)*Theta(3,2)*Theta(1,1)-Theta(3,3)*Theta(1,2)*Theta(2,1) ! this will keep the value of the determinant
+ ! finally, we get the RHS
+ fcol = nu*(ESBGK_f0 (Theta_inv,fij,dens,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w) - f )
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+ PRINT *, "EvalColRelES: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab", mom_L1,Mom_trshld,momsrates_reliab
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! DIAGNOSTIC: pleae comment if not wanted - next few lines tell if the solution is still physical  
+!! EVALUATION OF ENTROPY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+temp_dp=minval(f)
+if (temp_dp > 0.0d0) then 
+  entr = (-1)*sum(Real(log(f),DP)*fcol)
+  if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+else 
+ PRINT *, "EvalColRelES: velocity distribution is negative at least at one point"
+ entr = 0.0d0 
+ do i=1,size(f,1)
+  entr = entr - Real(log(max(f(i),0.0000001d0)),DP)*fcol(i)
+ end do
+ if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END DIAGNOSTICS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end subroutine EvalColRelES
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColRelES_1Donecell(f,Df,fcol,time)
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T
+!
+! 
+!
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColRelES_1Donecell(f,Df,fcol,time,cellnum)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+integer (I4B) :: cellnum ! number of the spatial cell for which the collision operator is evaluated
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: Theta, Theta_inv ! scrap variable to keep the artificial stress tensor and its inverse 
+real (DP), dimension(1:6) :: scrtheta ! 
+real (DP), dimension(1:6) :: fij_arr, dfij_arr !Just used to capture the fij and dfij in the bugger to copy over to excel.
+real (DP) :: fij, dfij,dens ! scrap variables
+! 
+real (DP) :: mom_L1 ! scrap variable to keep L1-norm of matrix Mom
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+real (DP), parameter :: Mom_trshld = 1.0d-8 ! This constant determines when the coefficents are updated in the velocity dependent collisio nfrequency. 
+                     ! if \| Mom \|_{L1}> Mom_trshld then the coefficients are updated. Otherwise, the "fall back" model is used.  
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar ! scrap variables to keep the values of the local bulk velocity
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates1Donecell_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab,cellnum) ! the subroutine returns momrates
+                                           	! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  
+ dens=sum(f*nodes_gwts)
+ do i=1,6
+   dfij = sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij = sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij_arr(i)=fij
+   dfij_arr(i)=dfij
+   scrtheta(i) = (fij - (momsrates(i)/nu)*dfij)*2.0_DP/dens
+ end do 
+ ! now the components of artificial stress tensor have been computed. We will transfer the values into the artificial stress tensor
+ Theta(1,1) = scrtheta(1)
+ Theta(2,2) = scrtheta(2)
+ Theta(3,3) = scrtheta(3)
+ Theta(2,1) = scrtheta(4)
+ Theta(1,2) = scrtheta(4)
+ Theta(3,1) = scrtheta(5)
+ Theta(1,3) = scrtheta(5)
+ Theta(3,2) = scrtheta(6)
+ Theta(2,3) = scrtheta(6)
+ ! we have got the artificial stress tensor set up 
+ Theta_inv = inv(Theta) ! get the inverse of the moments matrix
+ !!!!!!!!!!!!!!!!!!
+ fij = Theta(1,1)*Theta(2,2)*Theta(3,3)+Theta(2,1)*Theta(3,2)*Theta(1,3)+Theta(3,1)*Theta(1,2)*Theta(2,3) - &
+       Theta(1,3)*Theta(2,2)*Theta(3,1)-Theta(2,1)*Theta(1,2)*Theta(3,3)-Theta(1,1)*Theta(3,2)*Theta(2,3) ! this will keep the value of the determinant
+ ! finally, we get the RHS
+ fcol = nu * (ESBGK_f0 (Theta_inv,fij,dens,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w) - f )
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+!$OMP CRITICAL
+ PRINT *, "EvalColRelES1Donecell: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab, cellnum", mom_L1,Mom_trshld,&
+                                 momsrates_reliab, cellnum
+!$OMP END CRITICAL
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! DIAGNOSTIC: pleae comment if not wanted - next few lines tell if the solution is still physical  
+!! EVALUATION OF ENTROPY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+temp_dp=minval(f)
+!$OMP CRITICAL
+!if (temp_dp > 0.0d0) then 
+!  entr = (-1)*sum(Real(log(f),DP)*fcol)
+!  if (entr< 0.0) then 
+!   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+!  else  
+!   PRINT *, "EvalColRelES: entropy:", entr 
+!  end if 
+!else 
+! PRINT *, "EvalColRelES: velocity distribution is negative at least at one point"
+! entr = 0.0d0 
+! do i=1,size(f,1)
+!  entr = entr - Real(log(max(f(i),0.0000001d0)),DP)*fcol(i)
+! end do
+! if (entr< 0.0) then 
+!   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+!  else  
+!   PRINT *, "EvalColRelES: entropy:", entr 
+!  end if 
+!end if  
+!$OMP END CRITICAL
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END DIAGNOSTICS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end subroutine EvalColRelES_1Donecell
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColRelES_SC(f,Df,fcol,time)
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T
+!
+! ATTENTION: MAKE SURE THAT function kernls_enfrsd_moms set up to evaluate 
+! components of the stress tensor in the order t_11, t_22, t_33, t_12, t_13, t_23 
+!
+! This is a modification of the above model with some features introduced to enforce stability 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColRelES_SC(f,Df,fcol,time)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w, &
+                   !!!!! Diagnostic ADDED THIS TO save the coefficinets on file. Later remove! 
+                   Cco 
+                   !!!!! END DIAGNOSTIC 
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: Theta, Theta_inv ! scrap variable to keep the artificial stress tensor and its inverse 
+real (DP), dimension(1:6) :: scrtheta ! 
+real (DP), dimension(1:6) :: fij_arr, dfij_arr !Just used to capture the fij and dfij in the bugger to copy over to excel.
+real (DP) :: fij, dfij,dens ! scrap variables
+! 
+real (DP) :: mom_L1 ! scrap variable to keep L1-norm of matrix Mom
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+real (DP), parameter :: Mom_trshld = 1.0d-8 ! This constant determines when the coefficents are updated in the velocity dependent collisio nfrequency. 
+                     ! if \| Mom \|_{L1}> Mom_trshld then the coefficients are updated. Otherwise, the "fall back" model is used.  
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar,maxfactor,factor,mvmaxnorm,en_corr ! scrap variables to keep the values of the local bulk velocity
+real (DP), parameter :: Stress_TOL=0.5_DP ! The maximum allowed relative perturbation component vise for the corrections of the stress tensor
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates0D_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab) ! the subroutine returns moment relaxation rates
+											! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ dens=sum(f*nodes_gwts)
+ mvmaxnorm=0
+ ! here we compute the components of the stress tensor and the correction stress tensor
+ do i=1,6
+   dfij_arr(i) = sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij_arr(i) = sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   !! Compute the max norm of stress tensor, treating matrix as a vector.
+   if (abs(fij_arr(i))>mvmaxnorm) then 
+    mvmaxnorm=abs(fij_arr(i))
+   end if
+ end do
+ !!! here we compute the correction to enforce conservation of temperature 
+ !!! this correction will be subtracted on the diagonal of the RelES stress tensor
+ en_corr = (momsrates(1)*dfij_arr(1)+momsrates(2)*dfij_arr(2)+momsrates(3)*dfij_arr(3))/3.0_DP
+ !!! here we estimate the component-wise perturbation of the proposed corrections.  
+ !!! maxfactor will measure the lagest correction relative to the vector matrix norm
+ !!! This factor is 1 by default and does not affect the model. However, if the corrections are large
+ !!! they will be scaled down to keep the target distribution locally supported. The scaling factor 
+ !!! is added back in the last step. The controlled moments are not affected, but the 
+ !!! rest of the momets will be forced to relax faster than the ES_BGK collision frequency
+ !!!  
+ maxfactor = 1.0_DP
+ do i=1,3
+   dfij= abs((momsrates(i)*dfij_arr(i) - en_corr)/nu)
+   if (dfij > Stress_TOL*mvmaxnorm) then 
+    factor = dfij/Stress_TOL*mvmaxnorm
+    if (factor > maxfactor) then 
+      maxfactor = factor
+    end if
+   end if    
+ end do 
+ do i=4,6
+   dfij= abs((momsrates(i)/nu)*dfij_arr(i))
+   if (dfij > Stress_TOL*mvmaxnorm) then 
+    factor = dfij/Stress_TOL*mvmaxnorm
+    if (factor > maxfactor) then 
+      maxfactor = factor
+    end if
+   end if    
+ end do 
+ !!! BEGIN Diagnostics comment for production runs
+ if ((maxfactor > 4.0) .and. (maxfactor <=16.0)) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention! correction factor exceeded 4" 
+ end if 
+ if (maxfactor > 16.0) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention! correction factor exceeded 16" 
+ end if 
+ !!! END diagnostics
+ do i=1,3
+  scrtheta(i) = (fij_arr(i) - (momsrates(i)*dfij_arr(i) - en_corr)/nu/maxfactor)*2.0_DP/dens
+ end do 
+ do i=4,6
+  scrtheta(i) = (fij_arr(i) - (momsrates(i)/nu/maxfactor)*dfij_arr(i))*2.0_DP/dens
+ end do 
+ ! now the components of artificial stress tensor have been computed. We will transfer the values into the artificial stress tensor
+ Theta(1,1) = scrtheta(1)
+ Theta(2,2) = scrtheta(2)
+ Theta(3,3) = scrtheta(3)
+ Theta(2,1) = scrtheta(4)
+ Theta(1,2) = scrtheta(4)
+ Theta(3,1) = scrtheta(5)
+ Theta(1,3) = scrtheta(5)
+ Theta(3,2) = scrtheta(6)
+ Theta(2,3) = scrtheta(6)
+ ! we have got the artificial stress tensor set up 
+ Theta_inv = inv(Theta) ! get the inverse of the moments matrix
+ !!!!!!!!!!!!!!!!!!
+ fij = Theta(1,1)*Theta(2,2)*Theta(3,3)+Theta(2,1)*Theta(3,2)*Theta(1,3)+Theta(3,1)*Theta(1,2)*Theta(2,3) - &
+       Theta(1,3)*Theta(2,2)*Theta(3,1)-Theta(2,3)*Theta(3,2)*Theta(1,1)-Theta(3,3)*Theta(1,2)*Theta(2,1) ! this will keep the value of the determinant
+ ! finally, we get the RHS
+ fcol = nu*maxfactor*(ESBGK_f0 (Theta_inv,fij,dens,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w) - f )
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+ PRINT *, "EvalColRelES_SC_1Donecell: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab", mom_L1,Mom_trshld,momsrates_reliab
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! DIAGNOSTIC: pleae comment if not wanted - next few lines tell if the solution is still physical  
+!! EVALUATION OF ENTROPY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+temp_dp=minval(f)
+if (temp_dp > 0.0d0) then 
+  entr = (-1)*sum(Real(log(f),DP)*fcol)
+  if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+else 
+ PRINT *, "EvalColRelES: velocity distribution is negative at least at one point"
+ entr = 0.0d0 
+ do i=1,size(f,1)
+  entr = entr - Real(log(max(f(i),0.0000001d0)),DP)*fcol(i)
+ end do
+ if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END DIAGNOSTICS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end subroutine EvalColRelES_SC
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColRelES_SC_1Donecell(f,Df,fcol,time)
+!
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T
+! 
+! This is a modification of the above model with some features introduced to enforce stability 
+! 
+!
+! ATTENTION: MAKE SURE THAT function kernls_enfrsd_moms set up to evaluate 
+! components of the stress tensor in the order t_11, t_22, t_33, t_12, t_13, t_23 
+! 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColRelES_SC_1Donecell(f,Df,fcol,time,cellnum)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+integer (I4B) :: cellnum ! number of the spatial cell for which the collision operator is evaluated
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: Theta, Theta_inv ! scrap variable to keep the artificial stress tensor and its inverse 
+real (DP), dimension(1:6) :: scrtheta ! 
+real (DP), dimension(1:6) :: fij_arr, dfij_arr !Just used to capture the fij and dfij in the bugger to copy over to excel.
+real (DP) :: fij, dfij,dens ! scrap variables
+! 
+real (DP) :: mom_L1 ! scrap variable to keep L1-norm of matrix Mom
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+real (DP), parameter :: Mom_trshld = 1.0d-8 ! This constant determines when the coefficents are updated in the velocity dependent collisio nfrequency. 
+                     ! if \| Mom \|_{L1}> Mom_trshld then the coefficients are updated. Otherwise, the "fall back" model is used.  
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar,maxfactor,factor,mvmaxnorm,en_corr ! scrap variables to keep the values of the local bulk velocity
+real (DP), parameter :: Stress_TOL=1.0_DP ! The maximum allowed relative perturbation component vise for the corrections of the stress tensor
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!! Check for NaNs:
+ do i=1,size(f)
+  if (f(i).ne.f(i)) then
+    print *, "EvalColRelES_SC_1Donecell: NaN in the passed solution at point", i  
+  end if
+ end do 
+!!!!!!!!!!!!!! End checking for NaNs
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates1Donecell_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab,cellnum) ! the subroutine returns momrates
+                                           	! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 
+ !!!!!!!! Begin Diagnostics
+ if (nu<1.0e-6) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention, zero or small values of the collision freq. nu!"
+  stop
+ end if  
+ !!!!!!!!! End diagnostics
+ dens=sum(f*nodes_gwts)
+ mvmaxnorm=0
+ ! here we compute the components of the stress tensor and the correction stress tensor
+ do i=1,6
+   dfij_arr(i) = sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   fij_arr(i) = sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+   !! Compute the max norm of stress tensor, treating matrix as a vector.
+   if (abs(fij_arr(i)) > mvmaxnorm) then 
+    mvmaxnorm = abs(fij_arr(i))
+   end if
+ end do
+ !!!!!!!!!! Begin diagnostics
+ if ((fij_arr(1)<=0) .or. (fij_arr(2)<=0) .or. (fij_arr(3)<=0)) then 
+  print *, "EvalColRelES_SC_1Donecell: At leas one temperature component is negative"
+  stop
+ end if 
+ !!!!!!!!!! End diagnostics
+ !!!!!!!!!! Begin Diagnostics
+ if (mvmaxnorm<1.0E-10) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention, zero or small values in the stress tensor!"
+  stop
+ end if 
+ !!!!!!!!! End diagnostics 
+ 
+ !!! here we compute the correction to enforce conservation of temperature 
+ !!! this correction will be subtracted on the diagonal of the RelES stress tensor
+ en_corr = (momsrates(1)*dfij_arr(1) + momsrates(2)*dfij_arr(2) + momsrates(3)*dfij_arr(3))/3.0_DP
+ 
+ !!!!!!!!! Begin diagnostics 
+ if (abs(en_corr)> mvmaxnorm*0.1) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention, loss of temperature conservation more than 1%!"
+  stop
+ end if 
+ !!!!!!!!!!! End diagnostics
+  
+ !!! here we estimate the component-wise perturbation of the proposed corrections.  
+ !!! here we estimate the component-wise perturbation of the proposed corrections.  
+ !!! maxfactor will measure the lagest correction relative to the vector matrix norm
+ !!! This factor is 1 by default and does not affect the model. However, if the corrections are large
+ !!! they will be scaled down to keep the target distribution locally supported. The scaling factor 
+ !!! is added back in the last step. The controlled moments are not affected, but the 
+ !!! rest of the momets will be forced to relax faster than the ES_BGK collision frequency
+ !!!  
+ maxfactor = 1.0_DP
+ do i=1,3
+   dfij = abs( (momsrates(i)*dfij_arr(i) - en_corr) / nu)
+   if (dfij > Stress_TOL*mvmaxnorm) then 
+    factor = dfij/(Stress_TOL*mvmaxnorm)
+    if (factor > maxfactor) then 
+      maxfactor = factor
+    end if
+   end if    
+ end do 
+ do i=4,6
+   dfij= abs( (momsrates(i)/nu)*dfij_arr(i) )
+   if (dfij > Stress_TOL*mvmaxnorm) then 
+    factor = dfij/(Stress_TOL*mvmaxnorm)
+    if (factor > maxfactor) then 
+      maxfactor = factor
+    end if
+   end if    
+ end do 
+ !!! BEGIN Diagnostics comment for production runs
+ if ((maxfactor > 4.0) .and. (maxfactor <=16.0)) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention! correction factor exceeded 4" 
+ end if 
+ if (maxfactor > 16.0) then 
+  print *, "EvalColRelES_SC_1Donecell: Attention! correction factor exceeded 16" 
+ end if 
+ !!! END diagnostics
+ do i=1,3
+  scrtheta(i) = (fij_arr(i) - (momsrates(i)*dfij_arr(i) - en_corr)/nu/maxfactor)*2.0_DP/dens
+ end do 
+ do i=4,6
+  scrtheta(i) = (fij_arr(i) - (momsrates(i)/nu/maxfactor)*dfij_arr(i))*2.0_DP/dens
+ end do 
+ ! now the components of artificial stress tensor have been computed. We will transfer the values into the artificial stress tensor
+ Theta(1,1) = scrtheta(1)
+ Theta(2,2) = scrtheta(2)
+ Theta(3,3) = scrtheta(3)
+ Theta(2,1) = scrtheta(4)
+ Theta(1,2) = scrtheta(4)
+ Theta(3,1) = scrtheta(5)
+ Theta(1,3) = scrtheta(5)
+ Theta(3,2) = scrtheta(6)
+ Theta(2,3) = scrtheta(6)
+ ! we have got the artificial stress tensor set up 
+ Theta_inv = inv(Theta) ! get the inverse of the moments matrix
+ !!!!!!!!!!!!!!!!!!
+ fij = Theta(1,1)*Theta(2,2)*Theta(3,3)+Theta(2,1)*Theta(3,2)*Theta(1,3)+Theta(3,1)*Theta(1,2)*Theta(2,3) - &
+       Theta(1,3)*Theta(2,2)*Theta(3,1)-Theta(2,1)*Theta(1,2)*Theta(3,3)-Theta(1,1)*Theta(3,2)*Theta(2,3) ! this will keep the value of the determinant
+ !!!!!!!!!! Begin diagnostics
+ if (fij<=0)  then 
+  print *, "EvalColRelES_SC_1Donecell: det of modified stress tensor is zero or negative"
+  stop
+ end if 
+ !!!!!!!!!! End diagnostics
+       
+ ! finally, we get the RHS
+ fcol = nu*maxfactor*(ESBGK_f0 (Theta_inv,fij,dens,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w) - f )
+ !!!!!!!!!! Begin diagnostics
+ if (maxval(abs(fcol))>1.0E+2) then 
+  print *, "EvalColRelES_SC_1Donecell: high values in the collision operator!", maxval(fcol), minval(fcol)
+ end if 
+ !!!!!!!!!! End diagnostics
+ !!!!!!!!!! Begin diagnostics
+ if (maxval(abs(fcol))>1.0E+2) then 
+  print *, "EvalColRelES_SC_1Donecell: high values in the collision operator!", maxval(abs(fcol))
+ end if 
+ !!!!!!!!!! End diagnostics
+ !!!!!!!!!! Check for NaNs:
+ do i=1,size(fcol)
+  if (fcol(i).ne.fcol(i)) then
+    print *, "EvalColRelES_SC_1Donecell: NaN in the collision operator at point", i  
+  end if
+ end do 
+!!!!!!!!!!!!!! End checking for NaNs
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+!$OMP CRITICAL
+ PRINT *, "EvalColRelES1Donecell: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab, cellnum", mom_L1,Mom_trshld,&
+                                 momsrates_reliab, cellnum
+!$OMP END CRITICAL
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! DIAGNOSTIC: pleae comment if not wanted - next few lines tell if the solution is still physical  
+!! EVALUATION OF ENTROPY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+temp_dp=minval(f)
+!$OMP CRITICAL
+!if (temp_dp > 0.0d0) then 
+!  entr = (-1)*sum(Real(log(f),DP)*fcol)
+!  if (entr< 0.0) then 
+!   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+!  else  
+!   PRINT *, "EvalColRelES: entropy:", entr 
+!  end if 
+!else 
+! PRINT *, "EvalColRelES: velocity distribution is negative at least at one point"
+! entr = 0.0d0 
+! do i=1,size(f,1)
+!  entr = entr - Real(log(max(f(i),0.0000001d0)),DP)*fcol(i)
+! end do
+! if (entr< 0.0) then 
+!   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+!  else  
+!   PRINT *, "EvalColRelES: entropy:", entr 
+!  end if 
+!end if  
+!$OMP END CRITICAL
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END DIAGNOSTICS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end subroutine EvalColRelES_SC_1Donecell
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColGrad(f,Df,fcol,time)
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T
+!
+! 
+! Written by J. Limbacher 2017
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColGrad(f,Df,fcol,time)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w, &
+                   !!!!! Diagnostic ADDED THIS TO save the coefficinets on file. Later remove! 
+                   Cco 
+                   !!!!! END DIAGNOSTIC 
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: sigma, sigma2 ! scrap variable to keep the traceless artificial stress tensor and its inverse 
+real (DP), dimension(1:3) :: q !heat flux array
+real (DP), dimension(Order) :: moments !Store the moments
+real (DP) :: fij, dfij,dens,trace_sigma ! scrap variables
+! 
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar ! scrap variables to keep the values of the local bulk velocity
+real (DP), dimension (size(nodes_u)) :: vel_trace
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates0D_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab) ! the subroutine returns moment relaxation rates
+											! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 
+ dens=sum(f*nodes_gwts)
+ do i=1,10
+  fij=sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+  dfij=sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+  moments(i)= (fij - (momsrates(i)/(nu))*dfij)
+ end do
+ !moments(1) is pressure
+ sigma(1,1)=moments(2)
+ sigma(2,2)=moments(3)
+ sigma(3,3)=moments(4)
+ sigma(1,2)=moments(5)
+ sigma(2,1)=moments(5)
+ sigma(1,3)=moments(6)
+ sigma(3,1)=moments(6)
+ sigma(2,3)=moments(7)
+ sigma(3,2)=moments(7)
+ q(1)=moments(8)
+ q(2)=moments(9)
+ q(3)=moments(10)
+ 
+ fcol = nu * (EvalGrad13f0(dens,moments(1),sigma,q,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w)  - f )
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+ PRINT *, "EvalColRelES: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab", momsrates_reliab 
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! DIAGNOSTIC: pleae comment if not wanted - next few lines tell if the solution is still physical  
+!! EVALUATION OF ENTROPY
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+temp_dp=minval(f)
+if (temp_dp > 0.0d0) then 
+  entr = (-1)*sum(Real(log(f),DP)*fcol)
+  if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+else 
+ PRINT *, "EvalColRelES: velocity distribution is negative at least at one point"
+ entr = 0.0d0 
+ do i=1,size(f,1)
+  entr = entr - Real(log(max(f(i),0.0000001d0)),DP)*fcol(i)
+ end do
+ if (entr< 0.0) then 
+   PRINT *, "EvalColRelES: entropy is negative!:", entr 
+  else  
+   PRINT *, "EvalColRelES: entropy:", entr 
+  end if 
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END DIAGNOSTICS
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end subroutine EvalColGrad
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalColGrad_1Donecell(f,Df,fcol,time,cellnum)
+!
+! This is a copy of the above subroutine adjusted for 1D spatial solvers
+! 
+! This subroutine evaluates the collision operator using the model in which 
+! relaxation rates are enforced for moments (u-\bar{u})(u-\bar{u})^T 
+!
+! 
+!
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine EvalColGrad_1Donecell(f,Df,fcol,time,cellnum)
+
+use DGV_dgvtools_mod
+
+use DGV_commvar, only: MaxNumEnforcedMoments,MaxNumBFunctionsCollFreq,Order_nu,Order,&
+                   nu, nodes_gwts,nodes_u,nodes_v,nodes_w
+                   
+use DGV_distributions_mod
+
+intrinsic MAXVAL, ABS
+
+real (DP), dimension (:), intent (in) :: f,Df ! the components of the solution at the current time step. 
+						!Df = f - fM, Df is the difference between the solution and the local Maxwellian
+real (DP), dimension (:), intent (out) :: fcol ! the value of the collision operator for each component of the solution.
+real (DP), intent (in) :: time ! the current time
+integer (I4B) :: cellnum ! number of the spatial cell for which the collision operator is evaluated
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!
+real (DP), dimension(1:3,1:3) :: sigma, sigma2 ! scrap variable to keep the traceless artificial stress tensor and its inverse 
+real (DP), dimension(1:3) :: q !heat flux array
+real (DP), dimension(Order) :: moments !Store the moments
+real (DP) :: fij, dfij,dens,trace_sigma ! scrap variables
+! 
+real (DP) :: L1_err  ! Relative L1 norm of the deviation of the solution from the local Maxwellian.
+!!!!
+logical :: updateNulcl ! a scrap logical variable to use in updating relaxation rates.  
+real (DP), dimension (Order) :: momsrates ! a local array to store the relaxation rates for the moments 
+real (DP), dimension (Order_nu) :: Cco_temp ! local temporaty variable to store oefficeints for the vel. dep. collision requency
+real (DP), dimension (Order,Order_nu) :: Mom, MomInv ! the matrix of the system that is solved to determine the coefficients
+real (DP), dimension (Order) :: DifMom, Dphi ! scrap array to contain the values of the differenced between the enforced moments and their eq1uilibrium values. 
+real (DP), dimension (:), allocatable :: nuBolt ! the values of the velocity dependent collision frequency 
+real (DP) :: ubar,vbar,wbar ! scrap variables to keep the values of the local bulk velocity
+real (DP), dimension (size(nodes_u)) :: vel_trace
+!!!!
+integer (I4B) :: i ! scrap index 
+logical :: momsrates_reliab ! scrap variable that keeps the flag of reliability of   moment relaxation rates. If true then moments rates are reliable and can be used 
+                   !for the evaluation of velocity dependent collision frequency 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Diagnostics variables... 
+real (DP) :: min_nu, max_nu ! scrap variable to check if collision frequency goes below zero.
+real (DP) :: temp_dp, entr ! scrap variable to check positivity of entropy.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Then, we call a conglomerate subroutine that will determine the values of the enforced
+! relaxation rates. The subroutine will check if the rates need to be updated. If the rates 
+! are not updated, the stored rates are returned.
+! if the rates need to be updated, the Boltzmann collision integral is evaluated and 
+! the rates are determined from the Boltzmann collision integral
+!!!!!!!!!!!!!!!!!!!!!!!!
+call GetRelaxRates1Donecell_DGV(momsrates,f,Df,time,L1_err,ubar,vbar,wbar,nu,momsrates_reliab,cellnum) ! the subroutine returns momrates
+                                           	! and also the value of the L1_norm of the difference between the soltuion and the local maxwellian
+											! and also returns a flag momsrates_reliab. If this flag is true then at least one rate was computed 
+											! from the Boltzmann collision operator. Otherwise, coded default relaxation rate was used. This rate is 
+											! returned in the variable nu
+
+
+if (momsrates_reliab) then 
+ !!!!!!!!!!!!!!!!!!!!!!!
+ ! In the RelES model, the relaxation rates are enforced by providing coefficients of the (artificial) stress tensor that shows up in the target 
+ ! distribution function in the form of inhomogeneous guassian n/(pi^3 \det(T))^1/2 exp(-(u-\bar{u})^{T} T^{-1}(u-\bar{u}))
+ !
+ ! The coefficients of T are detrmined from this equation: 
+ !
+ ! ADD EQUATION
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 
+ dens=sum(f*nodes_gwts)
+ do i=1,10
+  fij=sum(f*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+  dfij=sum(Df*nodes_gwts*kernls_enfrsd_moms(i,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar))
+  moments(i)= (fij - (momsrates(i)/(nu))*dfij)
+ end do
+ !moments(1) is pressure
+ sigma(1,1)=moments(2)
+ sigma(2,2)=moments(3)
+ sigma(3,3)=moments(4)
+ sigma(1,2)=moments(5)
+ sigma(2,1)=moments(5)
+ sigma(1,3)=moments(6)
+ sigma(3,1)=moments(6)
+ sigma(2,3)=moments(7)
+ sigma(3,2)=moments(7)
+ q(1)=moments(8)
+ q(2)=moments(9)
+ q(3)=moments(10)
+ 
+ fcol = nu * (EvalGrad13f0(dens,moments(1),sigma,q,ubar,vbar,wbar,nodes_u,nodes_v,nodes_w)  - f )
+else 
+ ! If the moments rates are not reliable or if the Mom matrix is very small by L1-norm, we use the fallback model instead:    
+ !$OMP CRITICAL
+ PRINT *, "EvalColGrad_1Donecell: Invoke fall back model. mom_L1, Mom_trshld, momsrates_reliab, cellnum", &
+                                 momsrates_reliab, cellnum
+ !$OMP END CRITICAL
+ ! call ES-BGK model since the model with velocity-dependent collision frequency is expected to fail. 
+ call EvalColESBGK(f,fcol)
+end if
+! all done
+
+end subroutine EvalColGrad_1Donecell
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! GetRelaxRates0D_DGV(momsrates,f,Df,time,L1_err,LocUbar,LocVbar,LocWbar,nu,momsrates_reliab)
@@ -1506,6 +4030,8 @@ end subroutine EvalColVelES1Donecell
 ! momsrates  -- are the values of the relaxation rates to be inforced in the model with velocity dependent collisio nfrequency
 ! L1_err -- also returns the L1 nort of Df 
 !
+! 03222017 --- evaluation of nu moved from inside of if -- now evaluation is done at every call
+!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 subroutine GetRelaxRates0D_DGV(momsrates,f,Df,time,L1_err,LocUbar,LocVbar,LocWbar,nu,momsrates_reliab)
@@ -1521,8 +4047,8 @@ use DGV_dgvtools_mod
 real (DP), dimension(:), intent(in) :: f ! the solution(velocity distribution) on one spatial cell
 real (DP), dimension(:), intent(in) :: Df ! the difference between the solution and the local maxwellian on the primary mesh on one spatial cell (given, computed elsewhere)
 real (DP), dimension(:), intent(out):: momsrates ! this is the array which will contain the enforced relaxation rates
-real (DP), intent(in) :: time ! value of the dimensionless time variable
-real (DP), intent(out) :: L1_err ! value of the relative L_1 norm of the differnce between the solution and the local Maxwellian
+real (DP), intent (in) :: time ! value of the dimensionless time variable
+real (DP), intent (out) :: L1_err ! value of the relative L_1 norm of the differnce between the solution and the local Maxwellian
 real (DP), intent (out) :: LocUbar,LocVbar,LocWbar ! the values of the local bulk velocity
 real (DP), intent (out) :: nu ! value of the default relaxation rate -- will be assigned to moments for which the ralaxation rates can not be 
                               ! calculated form the Boltzmann collision operator
@@ -1530,7 +4056,7 @@ logical, intent (out) :: momsrates_reliab ! is true if at least one rate has cal
 !!!!!!!!!
 !! Atention: these parameters define how relaxatoin rates are determines. 
 real (DP), parameter  :: L1_MAX = 0.5 ! This coefficients determines which form of the Boltzmann collision integral is used. See description below
-real (DP), parameter  :: L1_SENS_TRSHLD = 1 ! This parameters determines the level of sensitivety of expression for evaluation of the relaxation rates. 
+real (DP), parameter  :: L1_SENS_TRSHLD = 0.2 ! This parameters determines the level of sensitivety of expression for evaluation of the relaxation rates. 
           ! the energy moment of the Botlzmann collision integral has to be zero. If it is not zero, this is only due to truncation errors =e_{2}. Thus this moment 
           ! can be used to judge about the truncation moments in moments of the collision operator. (The errors expeced to be larger for higher moments). 
           ! when evaluating the relaxation rates, the moments $m=\int_{R^3} Q(f,f)\phi$ evaluated with error $e_{m}$. We will hope that $e_{m}$ is comparable to $e_2$. 
@@ -1543,7 +4069,7 @@ real (DP), parameter  :: L1_SENS_TRSHLD = 1 ! This parameters determines the lev
           ! thus, in a sense, L1_SENS_TRSHLD gives the number of correct digits in the computed rate IF e_m\approx e_2 
           ! 
           !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-real (DP), parameter :: Mom_Close_Maxwl_TRSHLD = 1.0D-5 ! This is the second parameter that determines the sensitivity treshhold for evaluation 
+real (DP), parameter :: Mom_Close_Maxwl_TRSHLD = 1.0D-4 ! This is the second parameter that determines the sensitivity treshhold for evaluation 
                                                          ! of the relaxation rates for moments. It is possible that the moment is already close to 
                                                          ! its final state. In this case, assuming that there is more noice in the derivative of the moment 
                                                          ! than in the difference of the moment (especially if we use course mesh for evaluating the moment 
@@ -1582,11 +4108,11 @@ call CheckNuUpdateNeededF0Da_DGV(updateNulcl,time,f,Df,LocDens,LocUbar,LocVbar,L
           ! spatially homogeneous problem (0D). For 1D-2D and 3D problems, use versions of the subroutine that 
           ! work with an arrays in which index corresponding to different spatial cell 
           !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!
+! Evaluate ES-BGK nu - collision frequency
+nu = LocDens*LocTempr/((1-alpha))*((gas_T_reference/C_inf**2*2.0d0*gasR)/LocTempr)**gas_alpha  ! Dimensionless nu -- the classical collision frequency of the ES-BGK model
+! classican ES-BGK nu is used as a backup collision frequency 
 if (updateNulcl) then
- !!!!!!!!!!!!!!!!!!!!!
- ! Evaluate ES-BGK nu - collision frequency
- nu = LocDens*LocTempr/((1-alpha))*((gas_T_reference/C_inf**2*2.0d0*gasR)/LocTempr)**gas_alpha  ! Dimensionless nu -- the classical collision frequency of the ES-BGK model
- ! classican ES-BGK nu is used as a backup collision frequency 
  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
  ! to update the relaxation frequencies for the selected group of moments, the 
  ! full Boltzmann collision operator is evaluated using secondary velocity mesh. 
@@ -1620,7 +4146,7 @@ if (updateNulcl) then
   ! call or an MPI parallelization.  
   !!!!!!
   ! to make an single processor or an OpenMP evaluation, uncomment the next lime
-  call EvalCollisionPeriodicAPlus_DGVII(fII,fcolII) ! fcolII contains the value of the collision operator
+  call EvalCollisionPeriodicAPlus_DGVII_OMP(fII,fcolII) ! fcolII contains the value of the collision operator
   ! to make an MPI evaluation, uncomment the next line, but this will involve a lot of preparatory work:
   ! includind setting up MPI universes for the collision integral and such .
   ! this preparatory work should be done in the InitDGV0D/1D subroutine. Make sure all necessary lines are uncommented. 
@@ -1637,8 +4163,8 @@ if (updateNulcl) then
   ! Now we will make to calls of the collision operator
   !!!!!!!!!!
   ! to make an single processor or an OpenMP evaluation, uncomment the next lime
-  call EvalCollisionPeriodicAPlus_DGVII(fII,fcolII) ! fcolII contains the value of the collision operator f_{0}f_{0}A
-  call EvalCollisionPeriodicMixedTermsA_DGVII(fII,fmII,fcol1II) !
+  call EvalCollisionPeriodicAPlus_DGVII_OMP(fII,fcolII) ! fcolII contains the value of the collision operator f_{0}f_{0}A
+  call EvalCollisionPeriodicMixedTermsA_DGVII_OMP(fII,fmII,fcol1II) !
   ! to make an MPI evaluation, uncomment the next line, but this will involve a lot of preparatory work:
   ! includind setting up MPI universes for the collision integral and such .
   ! this preparatory work should be done in the InitDGV0D/1D subroutine. Make sure all necessary lines are uncommented. 
@@ -1685,6 +4211,9 @@ end subroutine GetRelaxRates0D_DGV
 ! momsrates  -- are the values of the relaxation rates to be inforced in the model with velocity dependent collisio nfrequency
 ! L1_err -- also returns the L1 nort of Df 
 !
+!
+! 03222017 --- evaluation of nu moved from inside of if -- now evaluation is done at every call
+!
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 subroutine GetRelaxRates1Donecell_DGV(momsrates,f,Df,time,L1_err,LocUbar,LocVbar,LocWbar,nu,momsrates_reliab,cellnum)
@@ -1709,7 +4238,7 @@ logical, intent (out) :: momsrates_reliab ! is true if at least one rate has cal
 integer (I4B), intent (in) :: cellnum ! the number of the spatial cell for which the rates are evaluated
 !!!!!!!!!
 !! Atention: these parameters defines how relaxatoin rates are determines. 
-real (DP), parameter  :: L1_MAX = 0.5 ! This coefficients determines which form of the Boltzmann collision integral is used. See description below
+real (DP), parameter  :: L1_MAX = 0.8 ! This coefficients determines which form of the Boltzmann collision integral is used. See description below
 real (DP), parameter  :: L1_SENS_TRSHLD = 1.0 ! This parameters determines the level of sensitivety of expression for evaluation of the relaxation rates. 
           ! the energy moment of the Botlzmann collision integral has to be zero. If it is not zero, this is only due to truncation errors =e_{2}. Thus this moment 
           ! can be used to judge about the truncation moments in moments of the collision operator. (The errors expeced to be larger for higher moments). 
@@ -1763,11 +4292,11 @@ call CheckNuUpdateNeededF1Donecella_DGV(updateNulcl,time,f,Df,LocDens,LocUbar,Lo
           ! spatially homogeneous problem (0D). For 1D-2D and 3D problems, use versions of the subroutine that 
           ! work with an arrays in which index corresponding to different spatial cell 
           !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Evaluate ES-BGK nu - collision frequency
+nu = LocDens*LocTempr/((1-alpha))*((gas_T_reference/C_inf**2*2.0d0*gasR)/LocTempr)**gas_alpha  ! Dimensionless nu -- the classical collision frequency of the ES-BGK model
+! classican ES-BGK nu is used as a backup collision frequency 
 if (updateNulcl) then
 !!!!!!!!!!!!!!!!!!!!!
- ! Evaluate ES-BGK nu - collision frequency
- nu = LocDens*LocTempr/((1-alpha))*((gas_T_reference/C_inf**2*2.0d0*gasR)/LocTempr)**gas_alpha  ! Dimensionless nu -- the classical collision frequency of the ES-BGK model
- ! classican ES-BGK nu is used as a backup collision frequency 
  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
  ! to update the relaxation frequencies for the selected group of moments, the 
  ! full Boltzmann collision operator is evaluated using secondary velocity mesh. 
@@ -1819,7 +4348,7 @@ if (updateNulcl) then
   !!!!!!!!!!
   ! to make an single processor or an OpenMP evaluation, uncomment the next lime
   call EvalCollisionPeriodicAPlus_DGVII(fII,fcolII) ! fcolII contains the value of the collision operator f_{0}f_{0}A
-  call EvalCollisionPeriodicMixedTermsA_DGVII(fII,fmII,fcol1II) !
+  call EvalCollisionPeriodicMixedTermsA_DGVII(fII,fMII,fcol1II) !
   ! to make an MPI evaluation, uncomment the next line, but this will involve a lot of preparatory work:
   ! includind setting up MPI universes for the collision integral and such .
   ! this preparatory work should be done in the InitDGV0D/1D subroutine. Make sure all necessary lines are uncommented. 
@@ -1837,7 +4366,8 @@ if (updateNulcl) then
  ! fcolII is only available on the secondary mesh  
  !!!!!!!!!!!!!!!!!
  ! call ComputeRelaxRatesBCI_DGV(fcolII,f,momsrates,L1_SENS_TRSHLD)    ! Both subroutines do the same, but the second one uses qunatities compluted previously 
- call ComputeRelaxRatesBCIa_DGV(fcolII,Df,momsrates,L1_SENS_TRSHLD,Mom_Close_Maxwl_TRSHLD,LocDens,LocUbar,LocVbar,LocWbar,LocTempr,nu,momsrates_reliab) ! The first subroutine computes quantities directly
+ call ComputeRelaxRatesBCIa_DGV(fcolII,Df,momsrates,L1_SENS_TRSHLD,Mom_Close_Maxwl_TRSHLD,LocDens,LocUbar,LocVbar, &
+        LocWbar,LocTempr,nu,momsrates_reliab) ! The first subroutine computes quantities directly
  MoRatesArry1D(:,cellnum) = momsrates ! safe the coefficients for future use.
  MoRatesReliable1D(cellnum) = momsrates_reliab ! update the flag is the relaxation rates were computed form the BCI 
  !!!!!!!!!!!!!!!!!
@@ -1903,7 +4433,7 @@ integer (I4B), intent (in) :: cellnum ! the number of the spatial cell/point for
 !!!!!!!!!!!
 real (DP), dimension (:), allocatable :: fcol_scr,Df ! scatch variable to keep the right side and the perturbation part
 real (DP) :: coef_temp ! Scrap variable
-real (DP), parameter :: kBoltzmann = 1.3080648813D-23 ! Boltzmann constant J/K
+real (DP), parameter :: kBoltzmann = 1.38064852D-23 ! Boltzmann constant J/K
 integer (I4B) :: run_mode ! scrap variable to store run_mode in the celected cell
 integer :: loc_alloc_stat
 
@@ -1924,11 +4454,19 @@ run_mode = run_mode_1D(cellnum)
 
 select case (run_mode) ! run_mode is set outside, when solution is evaluated for closeness to a maxwellian...  
 	case (0) ! run_mode=0 means we are very far from a Maxwellian. In this case we just call the collision operator
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  !!! UNCOMMENT if evaluating collision integral using Gauss Quadratures
+	  !!!
 	  !!! Two choises for the call of collision operator: Uncomment only one of them!  These procedures do the same, but slightly different in implementation
-	  !!! call EvalCollisionPeriodicA_DGV(f,fcol) ! This one uses intermediate arrays and is slower
-	  call EvalCollisionPeriodicAPlus_DGV(f,fcol) ! This one is a little faster that the one above... 
-	  !! Now we are adding the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
-	  coef_temp = (mol_diam/L_inf)**2*N_inf*dt
+	  !!! call EvalCollisionPeriodicA_DGV(f,fcol1) ! This one uses intermediate arrays and is slower
+	  !!! call EvalCollisionPeriodicAPlus_DGV(f,fcol) ! This one is a little faster that the one above...
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  !!! Uncomment if evaluating collision integral using Korobov Quadaratures
+	  !!!
+!	   call EvalCollisionPeriodicAKorOpt_DGV(f,fcol)
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      !! Now we are adding the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
+      coef_temp = (mol_diam/L_inf)**2*N_inf*dt
 	  fcol = fcol*coef_temp
 	  !! 
 	  !!!!
@@ -1936,12 +4474,18 @@ select case (run_mode) ! run_mode is set outside, when solution is evaluated for
 	  !!!!!!!!!!!! set us the allocatable array !
       allocate (fcol_scr(1:size(fcol,1)), stat=loc_alloc_stat)
       if (loc_alloc_stat >0) then 
-       print *, "UniversalCollisionOperator0DDGV: Allocation error for variables (fcol_scr)"
+       print *, "UniversalCollisionOperator1DDGV: Allocation error for variables (fcol_scr)"
        stop
       end if
-      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	  call EvalCollisionLinear(Df,fcol_scr)        ! This evaluates the linear part
-	  call EvalCollisionPeriodicAPlus_DGV(Df,fcol) ! this evaluates the non-linear part 
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  !!! Uncomment both lines if using Guass integration of the collision integral 
+	  !!! call EvalCollisionPeriodicMixedTermsA_DGV(Df,f-Df,fcol_scr)        ! This evaluates the linear part
+	  !!! call EvalCollisionPeriodicAPlus_DGV(Df,fcol) ! this evaluates the non-linear part 
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  !!! Uncomment both lines if using Korobov quadratures
+!	  call EvalCollisionPeriodicAKorMxdTmsOpt_DGV(Df,f-Df,fcol_scr)
+!	  call EvalCollisionPeriodicAKorOpt_DGV(Df,fcol)
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  fcol = fcol+fcol_scr
 	  deallocate (fcol_scr)
 	  !! Now we are addiing the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2 
@@ -1949,16 +4493,25 @@ select case (run_mode) ! run_mode is set outside, when solution is evaluated for
 	  fcol = fcol*coef_temp
 	  !!
 	case (2) ! this is the linear mode, we pretty much neglect the quadratic part..
-	  call EvalCollisionLinear(Df,fcol)        ! This evaluates the linear part
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  ! Uncomment if using Guass integration of the collision integral 
+	  ! call EvalCollisionPeriodicMixedTermsA_DGV(Df,f-Df,fcol)        ! This evaluates the linear part
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	  ! Uncomment if using Korobov quadratures
+!	  call EvalCollisionPeriodicAKorMixedTerms_DGV(Df,f-Df,fcol)
+	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  !! Now we are addiing the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
 	  coef_temp = (mol_diam/L_inf)**2*N_inf*dt
 	  fcol = fcol*coef_temp
+	  !! 
+	  !!!!
 	case (3) ! the velocity dep. ES-BGK mode
 		coef_temp = (kBoltzmann*N_inf)*C_inf/(2*gasR)/L_inf**2/gas_viscosity
 	    !! Now we are adding the dimensionless coefficient
 	    !call EvalColESBGK(f,fcol) ! UNCOMMENT IF USING THE classical ES MODEL
 	    !call EvalColShakov(f,fcol)  ! UNCOMMENT IF USING THE SHAKOV MODEL
-		call EvalColVelES1Donecell(f,Df,fcol,time,cellnum) ! Uncomment if using velocity dependent model
+		!call EvalColVelES1Donecell(f,Df,fcol,time,cellnum) ! Uncomment if using velocity dependent model
+		call EvalColRelES_SC_1Donecell(f,Df,fcol,time,cellnum)
 		fcol = fcol*coef_temp*dt
 	case (4) ! ES-BGK mode or Shakhov  
 		coef_temp = (kBoltzmann*N_inf)*C_inf/(2*gasR)/L_inf**2/gas_viscosity
@@ -2008,7 +4561,9 @@ end subroutine UniversalCollisionOperator1DonecellDGV
 subroutine UniversalCollisionOperator0DDGV(f,fcol,time,dt)
 
 use DGV_commvar, only: run_mode,mol_diam,L_inf,N_inf,T_inf,C_inf,gas_viscosity,gasR,&
-				   alpha,gas_T_reference,gas_alpha
+				   alpha,gas_T_reference,gas_alpha,&
+				   !debug
+				   nodes_u,nodes_v,nodes_w
 				   
 use DGV_dgvtools_mod
 
@@ -2017,15 +4572,22 @@ real (DP), dimension (:), intent (out) :: fcol ! value of the right side
 real (DP), intent (in) :: time ! the current time
 real (DP), intent (in) :: dt ! The time step 
 !!!!!!!!!!!
-real (DP), dimension (:), allocatable :: fcol_scr,Df ! scatch variable to keep the right side and the perturbation part
-real (DP) :: coef_temp,xxx ! Scrap variable
-real (DP), parameter :: kBoltzmann = 1.3080648813D-23 ! Boltzmann constant J/K
+real (DP), dimension (:), allocatable :: fcol_scr,Df,fcol1 ! scatch variable to keep the right side and the perturbation part
+real (DP) :: coef_temp,xxx,xxx0,xxx1,xxx2, seconds ! Scrap variable
+real (DP), parameter :: kBoltzmann = 1.38064852D-23 ! Boltzmann constant J/K
 integer :: loc_alloc_stat
 ! WARNING: Make sure that Nodes_Ashift, Nodes_ccan and other supplementary arrays are set before calling the 
 ! evaluation of the collision operator.
 
+interface 
+ function omp_get_wtime() result (y)
+   double precision :: y 
+ end function omp_get_wtime
+end interface  
+
+
 !!!!!!!!!!!! set us the allocatable array !
-allocate (Df(1:size(fcol,1)), stat=loc_alloc_stat)
+allocate (Df(1:size(fcol,1)),fcol1(1:size(fcol,1)), stat=loc_alloc_stat)
 if (loc_alloc_stat >0) then 
  print *, "UniversalCollisionOperator0DDGV: Allocation error for variables (Df)"
  stop
@@ -2033,22 +4595,34 @@ end if
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 call CheckSolutionMode_DGV(f,Df) ! This will check the local distribution function against a maxwellian with the same 5 macroparameters.
-
+!
+!
 select case (run_mode) ! run_mode is set outside, when solution is evaluated for closeness to a maxwellian...  
 	case (0) ! run_mode=0 means we are very far from a Maxwellian. In this case we just call the collision operator
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  !!! UNCOMMENT if evaluating collision integral using Gauss Quadratures
 	  !!!
 	  !!! Two choises for the call of collision operator: Uncomment only one of them!  These procedures do the same, but slightly different in implementation
-	  !!! call EvalCollisionPeriodicA_DGV(f,fcol) ! This one uses intermediate arrays and is slower
-	  !!! call EvalCollisionPeriodicAPlus_DGV(f,fcol) ! This one is a little faster that the one above...
+	  !!! call EvalCollisionPeriodicA_DGV(f,fcol1) ! This one uses intermediate arrays and is slower
+	  !!! DEBUG: EVALUATE PROCESSOR TIME NEXT LINE
+	  !!seconds = omp_get_wtime ( )
+      !!call cpu_time (xxx)
+	  !!! END DEBUG
+	  call EvalCollisionPeriodicAPlus_DGV_OMP(f,fcol) ! This one is a little faster that the one above...
+	  !!! DEBUG: EVALUATE PROCESSOR TIME NEXT LINE
+	  !! call cpu_time (xxx0)
+	  !! seconds = omp_get_wtime ( ) - seconds;
+	  !! print *, "Wall time lapsed in seconds:", seconds
+	  !! print *, "Total CPU time for all procs:", xxx0 - xxx
+	  !! stop
+	  !!! END DEBUG
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  !!! Uncomment if evaluating collision integral using Korobov Quadaratures
 	  !!!
-	  call EvalCollisionPeriodicAKor_DGV(f,fcol) 
-	  !! Now we are adding the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
-	  coef_temp = (mol_diam/L_inf)**2*N_inf*dt
-	  xxx=sum(fcol)
+	  ! call EvalCollisionPeriodicAKorOpt_DGV(f,fcol)
+      !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      !! Now we are adding the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
+      coef_temp = (mol_diam/L_inf)**2*N_inf*dt
 	  fcol = fcol*coef_temp
 	  !! 
 	  !!!!
@@ -2061,27 +4635,27 @@ select case (run_mode) ! run_mode is set outside, when solution is evaluated for
       end if
       !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  ! Uncomment if using Guass integration of the collision integral 
-	  ! call EvalCollisionPeriodicMixedTermsA_DGV(Df,f-Df,fcol_scr)        ! This evaluates the linear part
-	  ! call EvalCollisionPeriodicAPlus_DGV(Df,fcol) ! this evaluates the non-linear part 
+	  call EvalCollisionPeriodicMixedTermsA_DGV_OMP(Df,f-Df,fcol_scr)        ! This evaluates the linear part
+	  call EvalCollisionPeriodicAPlus_DGV_OMP(Df,fcol) ! this evaluates the non-linear part 
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  ! Uncomment if using Korobov quadratures
-	  call EvalCollisionPeriodicAKorMixedTerms_DGV(Df,f-Df,fcol_scr)
-	  call EvalCollisionPeriodicAKor_DGV(Df,fcol)
+	  !call EvalCollisionPeriodicAKorMxdTmsOpt_DGV(Df,f-Df,fcol_scr)
+	  !call EvalCollisionPeriodicAKorOpt_DGV(Df,fcol)
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  fcol = fcol+fcol_scr
 	  deallocate (fcol_scr)
 	  !! Now we are addiing the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2 
 	  coef_temp = (mol_diam/L_inf)**2*N_inf*dt
-	  xxx=sum(fcol)
+	  !xxx=sum(fcol)
 	  fcol = fcol*coef_temp
 	  !!
 	case (2) ! this is the linear mode, we pretty much neglect the quadratic part..
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  ! Uncomment if using Guass integration of the collision integral 
-	  ! call EvalCollisionPeriodicMixedTermsA_DGV(Df,f-Df,fcol)        ! This evaluates the linear part
+	  call EvalCollisionPeriodicMixedTermsA_DGV_OMP(Df,f-Df,fcol)        ! This evaluates the linear part
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  ! Uncomment if using Korobov quadratures
-	  call EvalCollisionPeriodicAKorMixedTerms_DGV(Df,f-Df,fcol)
+	  !call EvalCollisionPeriodicAKorMixedTerms_DGV(Df,f-Df,fcol)
 	  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	  !! Now we are addiing the dimensionless coefficient mol_diam^2*N_inf/(L_inf)^2
 	  coef_temp = (mol_diam/L_inf)**2*N_inf*dt
@@ -2091,7 +4665,8 @@ select case (run_mode) ! run_mode is set outside, when solution is evaluated for
 	    !! Now we are adding the dimensionless coefficient
 	    !call EvalColESBGK(f,fcol) ! UNCOMMENT IF USING THE classical ES MODEL
 	    !call EvalColShakov(f,fcol)  ! UNCOMMENT IF USING THE SHAKOV MODEL
-		call EvalColVelES(f,Df,fcol,time) ! Uncomment if using velocity dependent model
+		!call EvalColVelES(f,Df,fcol,time) ! Uncomment if using velocity dependent model
+        call EvalColRelES_SC(f,Df,fcol,time) ! Uncomment if using model whith ES-BGK collision frequency and artificial gaussian to enforce second moments
 		fcol = fcol*coef_temp*dt
 	case (4) ! ES-BGK mode or Shakhov  
 		coef_temp = (kBoltzmann*N_inf)*C_inf/(2*gasR)/L_inf**2/gas_viscosity
@@ -2763,5 +5338,77 @@ if (ABS(LocTempr - NuLastTemp1D(cellnum)) > NuLastTemp1D(cellnum)*tempr_trshld) 
 end if  
 !!!! all done! 
 end subroutine CheckNuUpdateNeededF1Donecella_DGV
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! CheckNuUpdateNeededF2Donecella_DGV(updateNulcl,time,f,Df,LocDens,LocUbar,LocVbar,LocWbar,LocTempr,L1_err,cellnum)
+!
+! another modification of the above suibroutine, in this version macroparamters are provided to the subroutine
+! 
+! A copy of the above subroutine to work with multidimensional solutions. cellnum is the number of the spatial cell
+!
+! A copy of the above subroutine with the exeption that Df - f-f_M is already provided -- so no need to comput it.
+! (Df - differnce between f and the local Maxwellian)
+!
+! This subrouitne is used to check if the coefficients of the velocity dependent collision frequency need to be updated
+! 
+! The subroutine uses the current solution, current time, some records and some set paramters to decide if the 
+! coefficeints neet to be updated. See description of the update criteria in the documnetation, but currently
+! three criteria are implemented: first criteria is time. There is an array in which the time of the next update is recorded.
+! second criteria is change in density and third criteria is a change in Temperature. Namely when either density or temprature change on more than 10% 
+! as compared to the last stored quantity, the coefficients are updates. Additional criterial for update may be introduced in the future. 
+! 
+! the solution used in the subroutine uses the primary mesh
+! 
+! the subrouitine returns a few parameters back:
+! updateNulcl == logical -- yes if an update is needed. 
+! LocDens,LocUbar,LocVbar,LocWbar,LocTempr, -- values of the local macroparameters
+! L1_err - l1 norm of Df
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+subroutine CheckNuUpdateNeededF2Donecella_DGV(updateNulcl,time,LocDens,LocTempr,cellnum)
+
+use DGV_commvar, only: MaxNumBFunctionsCollFreq, nodes_uII, nodes_vII, nodes_wII, &
+                       nodes_u, nodes_v, nodes_w, nodes_gwts,&
+                       NuNextUpdateTime1D,NuLastDens1D,NuLastTemp1D, &
+                       Order_nu,mft_coeff,pi25DT,mol_diam,L_inf,N_inf
+                       
+use DGV_distributions_mod                       
+
+
+logical, intent (out) :: updateNulcl  ! the returned flag if =True -- the coefficient need to be updated
+real (DP), intent(in) :: time         ! the current time
+real (DP), intent (in) :: LocDens,LocTempr ! values of the local macroparameters
+integer (I4B), intent (in) :: cellnum ! the numbder of the spatial cell for which the need for update is verified
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!  
+
+real (DP), parameter :: dens_trshld = 0.1 ! the fraction of the last saved density that serves as the threshhold for density triggered update
+real (DP), parameter :: tempr_trshld = 0.1 ! the fraction of the last saved density that serves as the threshhold for density triggered update
+ 
+!!!!!!!!!!!!!!!!!
+! now we have all variable setup and used at least once, so we will start applying the update criteria:
+updateNulcl = .false. ! reset the update flag
+! first we check the time of the next update. If we past that time, we need to update: 
+if (time > NuNextUpdateTime1D(cellnum)) then 
+ updateNulcl = .true.
+ ! also, we now need to set the next update time. 
+ ! the next update time is obtained by adding a multple of the local mean free time to the 
+ ! current time. We use the dimensionless mean free time for this operation:  
+ NuNextUpdateTime1D(cellnum) = time + & 
+    mft_coeff/LocDens/sqrt(LocTempr)*(L_inf**5)/(N_inf*mol_diam*mol_diam)/4.0/sqrt(pi25DT)*sqrt(2.0_DP)  
+end if
+! next we check the last saved values of the density 
+if (ABS(LocDens - NuLastDens1D(cellnum)) > NuLastDens1D(cellnum)*dens_trshld) then 
+ updateNulcl = .true.
+ NuLastDens1D(cellnum) = LocDens
+end if  
+! next we check the last saved values of the temperature 
+if (ABS(LocTempr - NuLastTemp1D(cellnum)) > NuLastTemp1D(cellnum)*tempr_trshld) then 
+ updateNulcl = .true.
+ NuLastTemp1D(cellnum) = LocTempr
+end if  
+!!!! all done! 
+end subroutine CheckNuUpdateNeededF2Donecella_DGV
 
 end module DGV_collision_mod

@@ -986,7 +986,7 @@ character (len=132) :: file_name ! the variable to store the file name
 integer (I4B) :: mm,nn ! is the scrap variable to keep te size of the A-arrays
 integer (I4B) :: code_line ! scrap variable
 integer (I4B) :: loc_alloc_stat ! to keep allocation status
-real :: zz ! some scrap variable
+real (DP) :: zz ! some scrap variable
 
 ! A quick check if the Arrays are already allocated
 if (size(A,1)>0) then
@@ -1053,7 +1053,7 @@ character (len=132) :: file_name ! the variable to store the file name
 integer (I4B) :: mm,nn ! is the scrap variable to keep te size of the A-arrays
 integer (I4B) :: code_line ! scrap variable
 integer (I4B) :: loc_alloc_stat ! to keep allocation status
-real :: zz ! some scrap variable
+real(DP) :: zz ! some scrap variable
 
 ! A quick check if the Arrays are already allocated
 if (size(A,1)>0) then
@@ -1437,7 +1437,94 @@ end subroutine ScanAarrsChnks4Acapphi
 !
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! ScanAarrsChnks4AcapphiII(A_capphi_aggreg,Act_aggreg)
+! 
+! This subroutine reads A-arrays from the disk when A-arrays are stored on the hard drive in chunks, 
+! It determines the number of records of A arrays stored in each chunk. This information is recorded in 
+! the array chnks_Act
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
+
+subroutine ScanAarrsChnks4AcapphiII(chunks_Act)
+
+use DGV_dgvtools_mod
+!                   
+intrinsic Trim
+!
+integer (I4B), dimension (:), intent (out) :: chunks_Act
+!
+
+character (len=132) :: file_name ! the variable to store the file name 
+integer (I4B) :: mm,nn,i ! is the scrap variable to keep te size of the A-arrays
+integer (I4B) :: code_line ! scrap variable
+integer (I4B) :: loc_alloc_stat ! to keep allocation status
+integer (I4B) :: nchnks
+!
+integer (I4B), dimension (:), allocatable :: Achnks_capphi
+
+nchnks=size(chunks_Act,1) ! determine the number of chunks
+
+!! Now the chunks of the A-arrays will be read and their A_capphi pieced together
+!! IT IS IMPORTNAT THAT THE INFORMATION IN STORED IN THE CHUNKS IN THE RIGHT ORDER. 
+!! 
+! first, we prepare the file name to read the A-arrays
+call MakeBaseNameAoperChnksDGVII(file_name,0)
+file_name = trim(Adjustl(file_name))//"_Aarrs.dat"  ! this will keep the cells array of the problem
+!
+! now we open the file for reading and read some stuff from it: 
+open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+read (15,  iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+close (15)
+
+! We now need to prepare the storage for the data.
+allocate (Achnks_capphi(1:mm), stat=loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ScanAarrsChnks4AcapphiII: Allocation error for variables Achnks_capphi"
+  stop
+  end if
+
+! now we open the file, again, to populate the A_capphi arrays
+open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+read (15, iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+read (15, iostat=code_line)	Achnks_capphi ! read the array		A_capphi (other arrays should be still there : A,A_xi,A_xi1,A_phi)
+close (15)
+!
+! We have scanned the first chunk of A-arrays and read the A_capphi for the first chunk. Now we need to move it to A_capphi_aggreg
+chunks_Act(1)= sum(Achnks_capphi)
+! 
+! Now we need to proceed with other chuncks. 
+
+do i=2,nchnks ! This array will loop until all chunks are read
+ ! first, we prepare the file name to read the A-arrays
+ call MakeBaseNameAoperChnksDGVII(file_name,i-1)
+ file_name = trim(Adjustl(file_name))//"_Aarrs.dat"  ! this will keep the cells array of the problem
+ !
+ ! now we open the file for reading and read some stuff from it: 
+ open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+ read (15,  iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+ read (15, iostat=code_line)	Achnks_capphi ! read the arrays A_capphi					
+ close (15)
+ !
+ ! now we need to add the number of records to A_capphi . 
+ chunks_Act(i) = sum(Achnks_capphi)
+ ! ready to reead the next chunk
+end do 
+deallocate (Achnks_capphi)
+!
+end subroutine ScanAarrsChnks4AcapphiII
+!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! ReadAarraysChnksOfstNrecDGV
+!
+! This is a copy of the above subroutine, except it works with the secondary grid.
 ! 
 ! This subroutine reads a given number of records of A-arrays from the disk when A-arrays are stored on 
 ! the hard drive in chunks. This subroutine will open chunk with the number fstchnk, it will skip the first 
@@ -1640,6 +1727,215 @@ do while ((Act < numrec) .and. (j <= nchnks)) ! This array will loop until enoug
 end do 
 ! Next we need to set up the supplementary "shift" arrays that will be used for integration of the right side...... 
 end subroutine ReadAarraysChnksOfstNrecDGV
+!
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! ReadAarraysChnksOfstNrecDGVII
+!
+! This is a copy of the above subroutine, except it works with the secondary grid.
+! 
+! This subroutine reads a given number of records of A-arrays from the disk when A-arrays are stored on 
+! the hard drive in chunks. This subroutine will open chunk with the number fstchnk, it will skip the first 
+! (ofst) records, and reads exactly numrec records into A arrays. If the chunk is finished but not eanough records have been read, 
+! the software moves to the next chunk untill the desired number of records achieved or untill all chunks were read. 
+!
+! fstchnk -- the number of the first chunk 
+! ofst  -- the number of records to skip in the first chunk (presumably these records are read at another process.
+! numrec -- the total number of records to read into A-arrays, 
+! nchnks -- the total number of chunks of A.
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
+
+subroutine ReadAarraysChnksOfstNrecDGVII(fstchnk,ofst,numrec,nchnks)
+
+use DGV_commvar, only: A=>AII,A_capphi=>A_capphiII,A_xi=>A_xiII,A_xi1=>A_xi1II,A_phi=>A_phiII
+use DGV_dgvtools_mod
+!                   
+intrinsic Trim
+!
+integer (I4B), intent (in) :: fstchnk ! the number of first chunks of data  
+integer (I4B), intent (in) :: ofst ! the number of records to skip in the first chunk   
+integer (I4B), intent (in) :: numrec ! the number of records that needs to be read  
+integer (I4B), intent (in) :: nchnks ! the total number of chunks in A  
+!
+character (len=132) :: file_name ! the variable to store the file name 
+integer (I4B) :: mm,nn,i,j,Act, Act_need ! is the scrap variable to keep te size of the A-arrays
+integer (I4B) :: code_line ! scrap variable
+integer (I4B) :: loc_alloc_stat ! to keep allocation status
+!
+real (DP), dimension (:), allocatable :: Achnks
+integer (I4B), dimension (:), allocatable :: Achnks_capphi, Achnks_xi, Achnks_xi1, Achnks_phi
+
+! A quck check if the Arrays are already allocated
+if (size(A,1)>0) then 
+   print *,"ReadAarraysChnksOfstNrecDGVII: A arrays are already allocated. Exit."
+   stop
+end if    
+!! Now the chunks of the A-arrays will be read and pieced together in the sequence imbedded in the filennames
+!! IT IS IMPORTNAT THAT THE INFORMATION IN STORED IN THE CHUNKS IN THE RIGHT ORDER. 
+!! In particular, A_capphi array will list the number of records for nodes. It will be expected that records in A 
+!! are ordered in the increasing I1, or A_phi. 
+!! 
+!! The first chunk will go directly to A-arrays.... 
+!! 
+! first, we prepare the file name to read the A-arrays
+call MakeBaseNameAoperChnksDGVII(file_name,fstchnk-1)
+file_name = trim(Adjustl(file_name))//"_Aarrs.dat"  ! this will keep the cells array of the problem
+!
+! now we open the file for reading and read some stuff from it: 
+open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+read (15,  iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+close (15)
+! check if the read was successful:
+if (code_line/=0) then 
+ print *,  "ReadAarraysChnksOfstNrecDGVII: read error for chunk of A-array. Possibly wrong name or damaged file. Stop"
+ stop
+end if
+
+! We now need to prepare the storage for the data.
+allocate (A_capphi(1:mm), Achnks_capphi(1:mm), stat = loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ReadAarraysChnksOfstNrecDGVII: Allocation error for variable  A_capphi"
+  stop
+  end if
+allocate (A_xi(1:numrec), A_xi1(1:numrec), A(1:numrec), A_phi(1:numrec), stat=loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ReadAarraysChnksOfstNrecDGVII: Allocation error for variable  A_xi, A_xi1, A_phi or A"
+  stop
+  end if
+ allocate (Achnks_xi(1:nn), Achnks_xi1(1:nn), Achnks(1:nn), Achnks_phi(1:nn), stat=loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ReadAarraysChnksOfstNrecDGVII: Allocation error for variable Achnks_xi, A_xi1, A_phi or A"
+  stop
+  end if
+! now we open the file, again, to populate the A-arrays
+open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+read (15, iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+read (15, iostat=code_line)	Achnks_capphi,Achnks,Achnks_xi,Achnks_xi1,Achnks_phi ! read the arrays		A_capphi,A,A_xi,A_xi1,A_phi					
+close (15)
+!
+! We have read the first chunk directly into Achnks-arrays.
+! Now we skip the number of records ofst and put the rest in the permanent A-Arrays.
+! first, determine the number of records to read: 
+A_capphi = 0
+Act = 0
+Act_need = min(nn-ofst,numrec-Act)  ! this variable keeps track of how many records needs to be added to the array from this chunk of A 
+A(1:Act_need)=Achnks(ofst+1:ofst+Act_need)
+A_xi(1:Act_need)=Achnks_xi(ofst+1:ofst+Act_need)
+A_xi1(1:Act_need)=Achnks_xi1(ofst+1:ofst+Act_need)
+A_phi(1:Act_need)=Achnks_phi(ofst+1:ofst+Act_need)
+Act=Act_need ! now we remember how many records we added to the A arrays... 
+!
+!  Now we need to write an A_capphi that corresponds to what is in A
+i=1
+do while ((ofst > sum(Achnks_capphi(1:i))) .and. (i<= mm)) ! we need to skip ofst records in this array.
+ i=i+1
+end do                            ! when this difference is negative, we went over the offset number of recods
+if (i>mm) then                    ! a quick check if we had enough records 
+ print *, "ReadAarraysChnksOfstNrecDGVII: may be rerror in the work array -- no records in the chunk after offset taken"
+ stop
+end if
+                                 
+if (sum(Achnks_capphi(1:i)) - ofst < Act_need) then            ! now we need to see if the records for the basis function i is longer than the total number of 
+ A_capphi(i) = sum(Achnks_capphi(1:i)) - ofst            !  records that will be read from this chunk. The appropriate number of records is acconted for.
+ Act_need = Act_need - sum(Achnks_capphi(1:i)) + ofst
+else 
+ A_capphi(i) = Act_need  
+ Act_need = 0
+end if 
+ 
+do while ((Act_need > 0) .and. (i<mm))
+ i=i+1
+ if (Achnks_capphi(i) >= Act_need) then 
+   A_capphi(i) = Act_need
+   Act_need = 0
+ else 
+   A_capphi(i) = Achnks_capphi(i) 
+   Act_need = Act_need - Achnks_capphi(i)
+ end if   
+end do 
+if ((i>=mm).and.(Act_need >0)) then                    ! a quick check if we had enough records 
+ print *, "ReadAarraysChnksOfstNrecDGVII: may be error in the work array -- no records in the chunk after offset taken"
+ stop
+end if     
+deallocate (Achnks,Achnks_xi,Achnks_xi1,Achnks_phi,Achnks_capphi)                            
+! We finished dealing with the first chunk.
+
+! Now if we still have insufficent records in A, we will try to read the next chunk and us records from there..
+j = fstchnk+1 ! point the index to the next chunk (remember that chunks are numbered from zero) 
+
+do while ((Act < numrec) .and. (j <= nchnks)) ! This array will loop until enough records is read or until all chunks are read 
+ ! first, we prepare the file name to read the A-arrays
+ call MakeBaseNameAoperChnksDGV(file_name,j-1) ! the names of chunks are numbered from zero, therefore it is j-1
+ file_name = trim(Adjustl(file_name))//"_Aarrs.dat"  ! this will keep the cells array of the problem
+ !
+ ! now we open the file for reading and read some stuff from it: 
+ open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+ read (15,  iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+ close (15)
+ 
+ ! We now need to prepare the storage for the data.
+ allocate (Achnks_capphi(1:mm), stat=loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ReadAarraysChnksOfstNrecDGVII: Allocation error for variable  A_capphi"
+  stop
+  end if
+ allocate (Achnks_xi(1:nn), Achnks_xi1(1:nn), Achnks(1:nn), Achnks_phi(1:nn), stat=loc_alloc_stat)
+    !
+  if (loc_alloc_stat >0) then 
+  print *, "ReadAarraysChnksOfstNrecDGVII: Allocation error for variable Achnks_xi, A_xi1, A_phi or A"
+  stop
+  end if
+ ! now we open the file, again, to populate the A-arrays
+ open (15, file=file_name, position ="REWIND", action="READ", &
+                   form="UNFORMATTED", access="SEQUENTIAL")
+ read (15, iostat = code_line) mm,nn ! notice that we read using one read statement because this is 
+								! how it was written
+ read (15, iostat=code_line)	Achnks_capphi,Achnks,Achnks_xi,Achnks_xi1,Achnks_phi ! read the arrays		A_capphi,A,A_xi,A_xi1,A_phi					
+ close (15)
+ !
+ ! now we need to record the new chunk into the A-arrays. 
+ ! We need to put only enough records to meet the total number of records requirement
+ Act_need = min(nn, numrec - Act)  ! this calculates the number of records to be saved from this chunk.  There is no offset aftert the first chunk
+ A(Act+1:Act+Act_need) = Achnks(1:Act_need)
+ A_xi(Act+1:Act+Act_need) = Achnks_xi(1:Act_need)
+ A_xi1(Act+1:Act+Act_need) = Achnks_xi1(1:Act_need)
+ A_phi(Act+1:Act+Act_need) = Achnks_phi(1:Act_need)
+ Act=Act+Act_need ! now we remember how many records have been added to the A arrays so far
+ ! No wwe need to update the A_caphi array. 
+ i=0              ! reset the counter 
+ do while ((Act_need > 0) .and. (i<mm)) ! will loop untill all records were taken account of or while ran out of records
+  i=i+1
+  if (Achnks_capphi(i) >= Act_need) then 
+   A_capphi(i) = A_capphi(i) + Act_need 
+   Act_need = 0
+  else 
+   A_capphi(i) = A_capphi(i) + Achnks_capphi(i) 
+   Act_need = Act_need - Achnks_capphi(i)
+  end if   
+ end do
+ if ((i>=mm).and.(Act_need >0)) then                    ! a quick check if we had enough records 
+  print *, "ReadAarraysChnksOfstNrecDGVII: may be rerror in the work array -- no records in the chunk after offset taken"
+  stop
+ end if     
+ ! now we need to destroy the chunks arrays:
+ deallocate (Achnks,Achnks_xi,Achnks_xi1,Achnks_phi,Achnks_capphi)
+ ! ready to reead the next chunk
+ j=j+1 ! Advance the number of chunk by one
+end do 
+! Next we need to set up the supplementary "shift" arrays that will be used for integration of the right side...... 
+end subroutine ReadAarraysChnksOfstNrecDGVII
 !
 
  
