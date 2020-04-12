@@ -781,6 +781,29 @@ case ("no update linearization steps wait")  ! ready to set up the number of chu
      print *, "num_Acopies=", num_Acopies
     end if  
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! used in K-Maxwell model 
+case ("kMaxwell Sample Size Factor")  ! ready to set up the multiplication factor for sample size in k-Maxwell model 
+    !!! First we read the parameters from the input line
+    call ReadIntegersFromLine(line_head, line, i_bulk, m_count, 1) ! last parameter is the default value for the paramenter to be read 
+    if (m_count > 0) then 
+    kMaxwell_sample_size_factor=i_bulk(1) ! all other inputs values are ignored 
+    else 
+    kMaxwell_sample_size_factor=5 ! set up to the default value 
+    end if 
+    if (slt==0) then 
+     print *, "kMaxwell_sample_size_factor=", kMaxwell_sample_size_factor
+    end if  
+case ("kMaxwell SampleRadiusFactor")       ! ready to set up the multiplication factor to determine rtadius of the sample sphere
+    !!! First we read the paramters from the input line
+    call ReadRealsFromLine(line_head, line, r_bulk, m_count, Real(100,DP)) ! last parameter is the default value for the paramenter to be read 
+    if (m_count > 0) then 
+     kMaxwell_radius_temp_factor=r_bulk(1) ! all other input values are ignored 
+    else 
+     kMaxwell_radius_temp_factor=2.0_DP ! set up to the default value 
+    end if  
+    if (slt==0) then 
+     print *, "kMaxwell_radius_temp_factor=", kMaxwell_radius_temp_factor
+    end if     
 case default
    if (slt==0) then  
     print *, "Can not process:" //line_head // "="// line

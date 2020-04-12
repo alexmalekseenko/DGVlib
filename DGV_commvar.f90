@@ -567,4 +567,16 @@ integer :: Acopy_irankII ! MPI variable for universe Acopy. Gives the rank of th
 !!! local copies of the arrays, for convenience
 real (DP), dimension (:), allocatable :: nodes_u_loc, nodes_v_loc, nodes_w_loc, nodes_gwts_loc,nodes_symfctr_loc ! dump variables to keep coordinated to nodes assigend to this processor. 
 
+
+!!!!!!!!!!!!! !!!!! PARAMETER VARIABLES USED in K-Maxwell models !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+! K-Maxwell model, is not used in other models
+! 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+integer (I4B) :: kMaxwell_sample_size_factor = 5.0_DP ! this coefficient determines how many samples is 
+                        ! generated in the randomly generate velocity
+                        ! the size of the sample is sample_size_factor*                   
+real (DP) :: kMaxwell_radius_temp_factor = 2.0_DP ! =2.58 --will include the tails   =1.5 will include more than half                                              
+
+
 end module DGV_commvar
