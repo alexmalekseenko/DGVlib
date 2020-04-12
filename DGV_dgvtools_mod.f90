@@ -395,59 +395,6 @@ deallocate(g_nds_u,g_nds_v,g_nds_w)
 
 end function EvalSolVeloPtCell_DGV
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! EvalSolVeloPtCellFast_DGV 
-!
-! This function is analogous to the previous one except it uses the unifrom structure fo the mech and 
-! numbering conventions to speedup the evaluation.
-!
-! This function will evaluate the solution at a velocity point on a specified velocity cell.
-! The value of the velocity node is assumed to belong to the cell. If it is not, large interpolation 
-! errors are expected. 
-!
-!
-!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-function EvalSolVeloPtCellFast_DGV(f,u,v,w,pcn) result (y)
-
-use DGV_commvar, only: nodes_pcell, nodes_ui, nodes_vi, nodes_wi,&
-				   cells_lu, cells_lv, cells_lw, & 
-                   cells_ru, cells_rv, cells_rw, & 
-                   g_nds_all,&
-                   su,sv,sw
-
-real (DP), dimension (:), intent (in) :: f ! the solution 
-real (DP), intent (in)     :: u,v,w    ! the components of the given velocity
-integer (I4B), intent (in) :: pcn  ! the number of the cell to which this velocity belong
-real (DP) ::  y       ! the value of the solution at the given point. 
-
-!!!!!!!!!!!!!!                      
-real (DP) :: unor,vnor,wnor,yy  ! scrap variables to keep the normalized velocity 
-integer (I4B) :: j
-integer :: loc_alloc_stat
-!!!!!!!!!!!!!!!!!!!!!!!!!
-unor = (u - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
-vnor = (v - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
-wnor = (w - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
-!!!!!!!!!!!!!!!!!!!!!!!!!!
-! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
-! basis function for that node and add it to the interpolated value
-y=0;
-do j=(pcn-1)*su*sv*sw+1,pcn*su*sv*sw
-  ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
-  ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
-  yy=1.0_DP ! reset the value of the basis function
-  yy=yy*lagrbasfun(nodes_ui(j),unor,g_nds_all(:su,su))
-  yy=yy*lagrbasfun(nodes_vi(j),vnor,g_nds_all(:su,su))
-  yy=yy*lagrbasfun(nodes_wi(j),wnor,g_nds_all(:su,su))
-  ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
-  y = y + f(j)*yy   
-enddo 
-
-end function EvalSolVeloPtCellFast_DGV
-
-
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! QuickCellFindUniformGrid_DGV 
 !
