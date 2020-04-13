@@ -455,7 +455,8 @@ end subroutine Set3DCellsR_DGV
 subroutine AllocCellsArrsDGV(M)
 use DGV_commvar, only: cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi, cells_vgi, cells_wgi
 
 integer (I4B), intent (in) :: M ! The size of the arrays...  
 !
@@ -546,20 +547,29 @@ allocate (cells_gow(1:M), stat=loc_alloc_stat)
   print *, "AllocCellsArrsDGV: Allocation error for variable (cells_gow)"
   stop
   end if
+allocate (cells_ugi(1:M),cells_vgi(1:M),cells_wgi(1:M), stat=loc_alloc_stat)
+     !
+  if (loc_alloc_stat >0) then 
+  print *, "AllocCellsArrsDGV: Allocation error for variable (cells_ugi/vgi/wgi)"
+  stop
+  end if
+
 end subroutine AllocCellsArrsDGV
 
 subroutine ExtendCellsArrsDGV(M)
 use DGV_commvar, only: cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi, cells_vgi, cells_wgi
 
 integer (I4B), intent (in) :: M ! The new size of the cells arrays...  
 !
 integer (I4B) :: loc_alloc_stat
 integer (I4B) :: Md ! a crap variable to keed the old size 
 !!!!!!!!!!!!!!
-real (DP), dimension(:), allocatable ::cpg,ccg,clu,clv,clw,cru,crv,crw,&
-                                       crefu,crefv,crefw,cgou,cgov,cgow  
+real (DP), dimension(:), allocatable ::clu,clv,clw,cru,crv,crw  
+integer (I4B), dimension(:), allocatable ::cpg,ccg,crefu,crefv,crefw,&
+                         cgou,cgov,cgow,cugi,cvgi,cwgi  
 
 Md=size(cells_pgrid, 1)
 if (Md>M) then 
@@ -577,7 +587,13 @@ if (loc_alloc_stat >0) then
 allocate (crefu(1:Md),crefv(1:Md),crefw(1:Md),cgou(1:Md),cgov(1:Md),cgow(1:Md),stat=loc_alloc_stat)
 !
 if (loc_alloc_stat >0) then 
-  print *, "ExtendCellsArrsDGV: Allocation error for variables cells_refw, cells_gow, cells_gou, cells_gov"
+  print *, "ExtendCellsArrsDGV: Allocation error for variables crefu,crefv,crefw,cgou,cgov,cgow"
+  stop
+  end if
+allocate (cugi(1:Md),cvgi(1:Md),cwgi(1:Md),stat=loc_alloc_stat)
+!
+if (loc_alloc_stat >0) then 
+  print *, "ExtendCellsArrsDGV: Allocation error for variables cugi,cvgi,cwgi"
   stop
   end if
 ! save the cells arrays in the temp arrays... 
@@ -595,10 +611,14 @@ crefw=cells_refw
 cgow=cells_gow
 cgou=cells_gou 
 cgov=cells_gov
+cugi=cells_ugi
+cvgi=cells_vgi
+cwgi=cells_wgi
 ! deallocate the old cells arrays... 
 deallocate (cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov)
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi,cells_vgi,cells_wgi)
 ! now we allocate with the new size M   
 allocate (cells_pgrid(1:M), stat=loc_alloc_stat)
      !
@@ -684,6 +704,13 @@ allocate (cells_gow(1:M), stat=loc_alloc_stat)
   print *, "ExtendCellsArrsDGV: Allocation error for variable (cells_gow)"
   stop
   end if
+allocate (cells_ugi(1:M),cells_vgi(1:M),cells_wgi(1:M), stat=loc_alloc_stat)
+     !
+  if (loc_alloc_stat >0) then 
+  print *, "ExtendCellsArrsDGV: Allocation error for variable (cells_ugi/vgi/wgi)"
+  stop
+  end if
+
 !! and the inverse assignment:
 cells_pgrid(1:Md)=cpg
 cells_cgrid(1:Md)=ccg
@@ -699,9 +726,13 @@ cells_refw(1:Md)=crefw
 cells_gow(1:Md)=cgow
 cells_gou(1:Md)=cgou
 cells_gov(1:Md)=cgov
+cells_ugi(1:Md)=cugi
+cells_vgi(1:Md)=cvgi
+cells_wgi(1:Md)=cwgi
+
 !! the rest will be filled outside. 
-deallocate(cpg,ccg,clu,clv,clw,cru,crv,crw,crefu,crefv,crefw,cgou,cgov,cgow)
-  
+deallocate(cpg,ccg,clu,clv,clw,cru,crv,crw,crefu,crefv,crefw,cgou,cgov,cgow,&
+      cugi,cvgi,cwgi)
 end subroutine ExtendCellsArrsDGV
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -919,8 +950,10 @@ integer (I4B), intent (in) :: M ! The new size of the cells arrays...
 integer (I4B) :: loc_alloc_stat
 integer (I4B) :: Md ! a crap variable to keed the old size 
 !!!!!!!!!!!!!!
-real (DP), dimension(:), allocatable ::cpg,ccg,clu,clv,clw,cru,crv,crw,&
+real (DP), dimension(:), allocatable ::clu,clv,clw,cru,crv,crw  
+integer (I4B), dimension(:), allocatable ::cpg,ccg,&
                                        crefu,crefv,crefw,cgou,cgov,cgow  
+
 
 Md=size(cells_pgrid, 1)
 if (Md>M) then 
@@ -1072,11 +1105,13 @@ end subroutine ExtendCellsArrsDGVII
 subroutine  DeAllocCellsArrsDGV
 use DGV_commvar, only: cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi, cells_vgi, cells_wgi
 
 deallocate(cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov)
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi, cells_vgi, cells_wgi)
 
 end subroutine DeAllocCellsArrsDGV
 
@@ -1110,7 +1145,8 @@ subroutine FillCellsArrsDGV(ibeg,iend,umesh,vmesh,wmesh,pgrid,gou,gov,gow)
 
 use DGV_commvar, only: cells_pgrid, cells_cgrid, cells_lu, cells_lv, cells_lw, & 
                    cells_ru, cells_rv, cells_rw, cells_refu, cells_refv, & 
-                   cells_refw, cells_gow, cells_gou, cells_gov
+                   cells_refw, cells_gow, cells_gou, cells_gov,&
+                   cells_ugi, cells_vgi, cells_wgi
 
 integer (I4B), intent(in) :: ibeg,iend ! beginning and end of the range to fill the cells array
 real (DP), dimension (0:), intent (in) :: umesh,vmesh,wmesh ! 1D meshes to be used
@@ -1148,6 +1184,9 @@ do iw=0,size(wmesh,1)-2
    cells_ru(mm) = umesh(iu+1)
    cells_rv(mm) = vmesh(iv+1)
    cells_rw(mm) = wmesh(iw+1)
+   cells_ugi(mm) = iu+1
+   cells_vgi(mm) = iv+1
+   cells_wgi(mm) = iw+1
    mm=mm+1
 end do 
 end do 
@@ -1640,50 +1679,6 @@ cshift=(ccell-1)*gou*gov*gow ! this will be the number of the node right before 
 pgcu=grids_cap_u(cells_pgrid(ccell))-1
 pgcv=grids_cap_v(cells_pgrid(ccell))-1
 pgcw=grids_cap_w(cells_pgrid(ccell))-1
-! now we will calculate the relative integer address of all cells on the grid.
-! first, we create a space where to store this information: 
-i=size(cells_pgrid,1)
-allocate (cells_ugi(1:i),cells_vgi(1:i),cells_wgi(1:i),stat=loc_alloc_stat)
-    !
-  if (loc_alloc_stat >0) then 
-  print *, "SetCellsUGIAshiftArrays: Allocation error for variable (cells_ugi/_vgi/_wgi)"
-  stop
-  end if
-! Nex we will calculate the adresses
-! IMPORTANT! Notice that this algorithm uses the convention that when enumerating cells the outside loop is in x, the 
-! middle loop is in y and the innermost is in z.  
-
-do phicell = 1,pgcu*pgcv*pgcw ! loop in all cells
-!
-ccell_ugi=1
-ccell_vgi=1
-ccell_wgi=1
-i=1
-do while (i<phicell)  
- i=i+1
- if (ccell_wgi == pgcw) then 
-   ccell_wgi = 1 
-   if (ccell_vgi == pgcv) then 
-     ccell_vgi = 1
-     if (ccell_ugi == pgcu) then  
-      print *,"EvalCollisionPeriodicA_DGV: Error the index of the canonical cell is not fouind. Value of (gui) is too big."
-      stop
-     else 
-      ccell_ugi=ccell_ugi+1
-     end if
-   else 
-     ccell_vgi=ccell_vgi+1
-   end if     
- else
-   ccell_wgi = ccell_wgi+1
- end if           
-end do 
-! finshed finding the cells addresses, now recording:
-cells_ugi(phicell) = ccell_ugi
-cells_vgi(phicell) = ccell_vgi
-cells_wgi(phicell) = ccell_wgi
-end do 
-! finished finding the local adress of the cells in the case of one grid only 
 ! Next find the nodes_Ashift and nodes_dui/_dvi/_dwi arrays. 
 ! First we allocated them... 
 i=size(nodes_vi,1)
@@ -2116,7 +2111,7 @@ use DGV_commvar, only: Mv,Mu,Mw,su,sv,sw,nodes_u,&
                   min_sens,Trad,fm,fmA,run_mode,Cco,&
 				  Order_nu,Order,SecondaryVelGridInUse,&
 				  MoRatesArry0DAllocated,MoRatesArry0D,&
-				  NuNextUpdateTime0D,NuLastDens0D,NuLastTemp0D 
+				  NuNextUpdateTime0D,NuLastDens0D,NuLastTemp0D,numchnksII 
 
 
 use DGV_dgvtools_mod
@@ -2192,8 +2187,8 @@ call WriteNodesDGV
 ! usually should not be attempted on one processor for 
 ! meshes exceeding 33^3 velocity notes. 
 !  
-! call SetA_DGV ! dgvtools_mod.f90
-! call SetAKorobov_DGV
+! call SetA_DGV        ! call evaluation of A on Gauss nodes
+! call SetAKorobov_DGV ! call evaluation of A on Korobov nodes
 !!!!!!!!!!!!!!!!!
 ! For lagre meshes, one should use MPI versio of the 
 ! subroutine SetA_DGV . 
@@ -2208,8 +2203,8 @@ call WriteNodesDGV
 ! To save Operator A on thehard Drive use the 
 ! the following subroutine 
 !!!!!!!
-! call WriteAarraysDGV
-! call WriteAKorArraysDGV
+! call WriteAarraysDGV      ! write A on Gauss nodes on hard drive 
+! call WriteAKorArraysDGV   ! write A on Korobov nodes on hard drive 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!! uncomment the stop directive here is only computing A or Akor arrays....
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2222,7 +2217,7 @@ call WriteNodesDGV
 !! READ pre-computed operators A and Akor
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !!!! This will read Operator A arrays using the name specified in the DGV parameter file
-!! call ReadAarraysDGV 
+call ReadAarraysDGV 
 !!!! This will read Operator A arrays is they are broken into a number of chunks
 !! call ReadAarraysChnksDGV(25) ! use 9 if the A-array is divided into 9 chunks numbered 0-8. So, 
                                  ! this parameter is the number of chunks, not the number of the last 
@@ -2231,7 +2226,10 @@ call WriteNodesDGV
 !!!! This will read a collection of Akor arrays that correspond to several Korobov nets.
 !!!! Comment if not using Korobov Quadrature evaluation of the collision integral 
 ! call ReadAKorArraysAllNets_DGV 
-!!!!!!!
+!!!!!!! Random number will be used later in the code for Korobov integration 
+call RANDOM_SEED ! prepare the random number generator -- refresh the seed vector
+!!!!!!!!!
+
 
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -2244,10 +2242,10 @@ call WriteNodesDGV
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! UNCOMMENT IF USING EITHER A or AKOR ON THE PRIMARY MESH
 ! This subroutine will set arrays nodes_dui, _dvi, dwi, and nodes_phican
-! call SetCellsUGI_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
+call SetCellsUGI_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
 ! UNCOMMENT IF USING A ON PRIMARY MESH
 ! This subroutine sets up arrays Ashift
-!! call SetAshift_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
+call SetAshift_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
 ! UNCOMMENT IF USING Akor on primary mesh (integrating Boltzmann collision operator using Korobov quadratures)
 ! This subroutine sets up arrays AkorAllNets_shift
 ! call SetAkorshiftAllNets_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
@@ -2264,8 +2262,6 @@ call WriteNodesDGV
 ! Because the collisio operator will use secondary mesh we check the flag SecondaryVelGridInUse whether 
 ! the secondary mesh is in use. If it is, we create the mesh and then may read the operator A
 !
-!!! DISABLE SECONDARY GRID
-SecondaryVelGridInUse=.false.
 if (SecondaryVelGridInUse) then 
 ! We create variables of the secondary mesh
 ! A quick check of we have paparameters of the secondary mesh defined: 
@@ -2315,7 +2311,7 @@ if (SecondaryVelGridInUse) then
  !!!! This will read Operator A arrays using the name specified in the DGV parameter file
  call ReadAarraysDGVII 
  !!!! This will read Operator A arrays is they are broken into a number of chunks
- !! call ReadAarraysChnksDGVII(25) ! use 9 if the A-array is divided into 9 chunks numbered 0-8. So, 
+ !! call ReadAarraysChnksDGVII(numchnksII) ! use 9 if the A-array is divided into 9 chunks numbered 0-8. So, 
                                  ! this parameter is the number of chunks, not the number of the last 
                                  ! chunk. Example: to read chunks _ch000 to _ch008 use value 9 here
  !!!!!!!!!!!!!!!!!!!!!!!!
@@ -2540,6 +2536,43 @@ call WriteNodesDGV
 ! call WriteAarraysDGV
 ! call WriteAKorArraysDGV
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! READ pre-computed operators A and Akor
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!! This will read Operator A arrays using the name specified in the DGV parameter file
+!!  call ReadAarraysDGV 
+!!!! This will read Operator A arrays is they are broken into a number of chunks
+!! call ReadAarraysChnksDGV(25) ! use 9 if the A-array is divided into 9 chunks numbered 0-8. So, 
+                                 ! this parameter is the number of chunks, not the number of the last 
+                                 ! chunk. Example: to read chunks _ch000 to _ch008 use value 9 here
+!!!!!!!!!!!!!!!!!!!!!!!!
+!!!! This will read a collection of Akor arrays that correspond to several Korobov nets.
+!!!! Comment if not using Korobov Quadrature evaluation of the collision integral 
+ !call ReadAKorArraysAllNets_DGV 
+!!!!!!! Random number will be used later in the code for Korobov integration 
+call RANDOM_SEED ! prepare the random number generator -- refresh the seed vector
+!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! END READ pre-computed operators A and Akor
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Once the A and Akor arrays are in the memory, they are still can not be used untill a few additional arrays are 
+! set up. The next subroutines set up those arrays.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! UNCOMMENT IF USING EITHER A or AKOR ON THE PRIMARY MESH
+! This subroutine will set arrays nodes_dui, _dvi, dwi, and nodes_phican
+call SetCellsUGI_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
+! UNCOMMENT IF USING A ON PRIMARY MESH
+! This subroutine sets up arrays Ashift
+! call SetAshift_DGV(FindCellContainsPoint_DGVII(0.0_DP,0.0_DP,0.0_DP))
+! UNCOMMENT IF USING Akor on primary mesh (integrating Boltzmann collision operator using Korobov quadratures)
+! This subroutine sets up arrays AkorAllNets_shift
+ !call SetAkorshiftAllNets_DGV(FindCellContainsPoint_DGV(0.0_DP,0.0_DP,0.0_DP))
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! The following few lines set up necessary variables to work with the Boltzmann collision integral. 

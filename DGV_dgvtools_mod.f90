@@ -395,6 +395,117 @@ deallocate(g_nds_u,g_nds_v,g_nds_w)
 
 end function EvalSolVeloPtCell_DGV
 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalSolVeloPtCellFast_DGV 
+!
+! This function is analogous to the previous one except it uses the unifrom structure fo the mech and 
+! numbering conventions to speedup the evaluation.
+!
+! This function will evaluate the solution at a velocity point on a specified velocity cell.
+! The value of the velocity node is assumed to belong to the cell. If it is not, large interpolation 
+! errors are expected. 
+!
+!
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+function EvalSolVeloPtCellFast_DGV(f,u,v,w,pcn) result (y)
+
+use DGV_commvar, only: nodes_pcell, nodes_ui, nodes_vi, nodes_wi,&
+				   cells_lu, cells_lv, cells_lw, & 
+                   cells_ru, cells_rv, cells_rw, & 
+                   g_nds_all,&
+                   su,sv,sw
+
+real (DP), dimension (:), intent (in) :: f ! the solution 
+real (DP), intent (in)     :: u,v,w    ! the components of the given velocity
+integer (I4B), intent (in) :: pcn  ! the number of the cell to which this velocity belong
+real (DP) ::  y       ! the value of the solution at the given point. 
+
+!!!!!!!!!!!!!!                      
+real (DP) :: unor,vnor,wnor,yy  ! scrap variables to keep the normalized velocity 
+integer (I4B) :: j
+integer :: loc_alloc_stat
+!!!!!!!!!!!!!!!!!!!!!!!!!
+unor = (u - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+vnor = (v - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+wnor = (w - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+!!!!!!!!!!!!!!!!!!!!!!!!!!
+! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+! basis function for that node and add it to the interpolated value
+y=0;
+do j=(pcn-1)*su*sv*sw+1,pcn*su*sv*sw
+  ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+  ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+  yy=1.0_DP ! reset the value of the basis function
+  yy=yy*lagrbasfun(nodes_ui(j),unor,g_nds_all(:su,su))
+  yy=yy*lagrbasfun(nodes_vi(j),vnor,g_nds_all(:su,su))
+  yy=yy*lagrbasfun(nodes_wi(j),wnor,g_nds_all(:su,su))
+  ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+  y = y + f(j)*yy   
+enddo 
+
+end function EvalSolVeloPtCellFast_DGV
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! EvalSolVeloPtCellFast_DGV 
+!
+! This function is analogous to the previous one except it uses the unifrom structure fo the mech and 
+! numbering conventions to speedup the evaluation.
+!
+! This function will evaluate the solution at a velocity point on a specified velocity cell.
+! The value of the velocity node is assumed to belong to the cell. If it is not, large interpolation 
+! errors are expected. 
+!
+!
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+function EvalSolVeloPtCellFastAlt_DGV(f,u,v,w,pcn) result (y)
+
+use DGV_commvar, only: nodes_pcell, &
+				   cells_lu, cells_lv, cells_lw, & 
+                   cells_ru, cells_rv, cells_rw, & 
+                   g_nds_all,&
+                   su,sv,sw
+
+real (DP), dimension (:), intent (in) :: f ! the solution 
+real (DP), intent (in)     :: u,v,w    ! the components of the given velocity
+integer (I4B), intent (in) :: pcn  ! the number of the cell to which this velocity belong
+real (DP) ::  y       ! the value of the solution at the given point. 
+
+!!!!!!!!!!!!!!                      
+real (DP) :: unor,vnor,wnor, piunor,pjvnor,plwnor  ! scrap variables to keep the normalized velocity 
+integer (I4B) :: i,j,l,node_ijl
+integer :: loc_alloc_stat
+!!!!!!!!!!!!!!!!!!!!!!!!!
+unor = (u - (cells_ru(pcn) + cells_lu(pcn))/2.0_DP )/(cells_ru(pcn) - cells_lu(pcn))*2.0_DP 
+vnor = (v - (cells_rv(pcn) + cells_lv(pcn))/2.0_DP )/(cells_rv(pcn) - cells_lv(pcn))*2.0_DP 
+wnor = (w - (cells_rw(pcn) + cells_lw(pcn))/2.0_DP )/(cells_rw(pcn) - cells_lw(pcn))*2.0_DP 
+!!!!!!!!!!!!!!!!!!!!!!!!!!
+! next we will go over all velocity nodes on the primary cell. If we find a node that belongs to the cell with number (primecellnum) we will assemble the 
+! basis function for that node and add it to the interpolated value
+y=0;
+node_ijl = (pcn-1)*su*sv*sw
+do i=1,su 
+ piunor = lagrbasfun(i,unor,g_nds_all(:su,su))
+ do j=1,sv
+  pjvnor = lagrbasfun(j,vnor,g_nds_all(:sv,sv))
+  do l=1,sw 
+   ! next we need to know the three local indices that tell what velocity nodal values correspond to this 
+   ! basis function. this is also simple since this information is also stored in the Nodes Arrays.
+   plwnor = lagrbasfun(l,wnor,g_nds_all(:sw,sw))
+  ! now y contains the value of the basis function for the node "j". It is time to add the node J to interpolation: 
+  node_ijl = node_ijl+1
+  y = y + f(node_ijl)*piunor*pjvnor*plwnor
+enddo
+enddo 
+enddo  
+
+end function EvalSolVeloPtCellFastAlt_DGV
+
+
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! QuickCellFindUniformGrid_DGV 
 !
@@ -465,7 +576,6 @@ endif
 
 end function QuickCellFindUniformGrid_DGV
 
-
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! QuickCellFindUniformGridIJL_DGV 
 !
@@ -532,6 +642,7 @@ if ( (u >= u_L - tolerance) .and. (u <= u_R + tolerance) &
 endif 
 
 end subroutine QuickCellFindUniformGridIJL_DGV
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
 ! finduiviwi(ugrid,vgrid,wgrid,u,v,w,ui,vi,wi)
@@ -792,8 +903,13 @@ do i3=i2+1,ni ! loop in velocity 2
    do d=1,Nchi1
    ! each d gives one cell
    ! First, we evaluate the integrand on the left node of the cell
-    if ((d>1) .and. (NodesChi1(2*d-1) == NodesChi1(2*d-2))) then 
-     FuncChi1(3*d-2)= FuncChi1(3*d-3) ! if the node is repeating, the value has been computed already
+    if (d>1) then
+     if (NodesChi1(2*d-1) == NodesChi1(2*d-2)) then 
+      FuncChi1(3*d-2)= FuncChi1(3*d-3) ! if the node is repeating, the value has been computed already
+     else 
+      FuncChi1(3*d-2) = A_IntEpsilon(NodesChi1(2*d-1),ires_e,xiu,xiv,xiw,xi1u,xi1v,xi1w,ugu,ugv,ugw,ugux2,ugvx2,ugwx2,&
+              ugux3,ugvx3,ugwx3,g1,g2,dsph,i1,ErrEps,varphi_xi,varphi_xi1)
+     end if
     else 
      FuncChi1(3*d-2) = A_IntEpsilon(NodesChi1(2*d-1),ires_e,xiu,xiv,xiw,xi1u,xi1v,xi1w,ugu,ugv,ugw,ugux2,ugvx2,ugwx2,&
               ugux3,ugvx3,ugwx3,g1,g2,dsph,i1,ErrEps,varphi_xi,varphi_xi1)
@@ -905,8 +1021,8 @@ do i3=i2+1,ni ! loop in velocity 2
       A_xi1(A_ct) = i3 
       A_phi(A_ct) = i1
 !!
-iiii = omp_get_thread_num()
-print *, "I2=", i2, "Thread", iiii, "A_ct=", A_ct, i3        
+!iiii = omp_get_thread_num()
+!print *, "I2=", i2, "Thread", iiii, "A_ct=", A_ct, i3        
 !$omp end critical           
    end if                    
 !!!!!!!!!!!! end evaluation of A !!!!!!!!!!!
@@ -1300,7 +1416,7 @@ integer (I4B) :: A_ct, phi_ct, loc_alloc_stat ! scrap variables. A_ct is a count
 							!phi_ct counts how many records have been created for this particular basis function.  
 integer (I4B) :: An ! this varable will keep the current size of the array A.
 integer (I4B) :: ni ! this one will keep the size of the nodes array
-integer (I4B) :: i1,i2,i3,d,e ! local counters  
+integer (I4B) :: i1,i2,d,e ! local counters  
 integer (I4B) :: pci ! local integer
 real (DP), dimension (8) :: uu,vv,ww ! coordinates of the 8 vertices of the support of the basis function
 real (DP) :: dphi, dsph ! diameters for the circumscribed sphere for basis function and the collision shpere
@@ -1381,7 +1497,7 @@ ires_e = ires_t
 !$OMP PARALLEL DO PRIVATE(xiu,xiv,xiw,xi1u,xi1v,xi1w,dsph,dist2,ugu,ugv,ugw, & 
 !$OMP    ugux2,ugvx2,ugwx2,ugux3,ugvx3,ugwx3,g1,g2,Nchi1,NodesChi1,FuncChi1,d, & 
 !$OMP    CellsChiRef1,Atemp,ChiAdaptFlag,int1,NodesChi2,FuncChi2,CellsChiRef2,e, &
-!$OMP    quad,quad1,quad2,es,i2,i3,iiii,varphi_xi,varphi_xi1,frac_part) NUM_THREADS(Num_OMP_threads) &
+!$OMP    quad,quad1,quad2,es,i2,iiii,varphi_xi,varphi_xi1,frac_part) NUM_THREADS(Num_OMP_threads) &
 !$OMP    SCHEDULE(DYNAMIC, 5)  
 do i2=I2_from,I2_to  ! loop in specified Korobov nodes
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -1569,7 +1685,7 @@ xi1w = (frac_part - 0.5_DP)*(w_R-w_L)+(w_R+w_L)/2.0_DP
       ! now we need to add the volume elements for xi and xi1 
       ! ATTENTION: molecular diameter mol_diam is removed in the dimensionless formulation)
       ! Dimensionless code. Molecular diameter is accounted for in the spatial operator. 
-      Atemp = Atemp*(u_R-u_L)*(v_R-v_L)*(w_R-w_L)*(u_R-u_L)*(v_R-v_L)*(w_R-w_L)/Real(korob_net_param(1),DP) ! this takes care of the volume elements and the weight 1/p for xi,xi1 
+      Atemp = Atemp*( ((u_R-u_L)*(v_R-v_L)*(w_R-w_L))**2 )/Real(korob_net_param(1),DP) ! this takes care of the volume elements and the weight 1/p for xi,xi1 
       !		
       dsph=dsph/8.0_DP  ! this takes care of the fraction 1/8 still need to add |g|
       Akor(A_ct) = Atemp*dsph ! this takes care of |g|/8
@@ -1994,7 +2110,8 @@ real (DP) :: z,ku,kv,kw ! compoents of the unit vector in the direction of post 
 
    ! now we evaluate basis the basis functions on these velocities 
      z = EvalLagrBasisFunByNdsDGblzmEZ(xiupr,xivpr,xiwpr,i1) + &
-       EvalLagrBasisFunByNdsDGblzmEZ(xi1upr,xi1vpr,xi1wpr,i1) - varphi_xi - varphi_xi1 
+       EvalLagrBasisFunByNdsDGblzmEZ(xi1upr,xi1vpr,xi1wpr,i1) !- varphi_xi - varphi_xi1 ! comment the last two terms if 
+                                                              ! want to compute only positive terms in operator A. (the last two correspond to the values of the basis function on Pre-collision velocities)
      y=z  
 end function EvalPhiPostCollIntegrand     
 
@@ -2054,11 +2171,15 @@ logical :: EpsAdaptFlag ! a logical variable to tell if any of the refinements n
    do f=1,Neps1
    ! each f gives one cell
    ! First, we evaluate the integrand on the left node of the cell
-    if ((f>1) .and. (NodesEps1(2*f-1) == NodesEps1(2*f-2))) then 
-     FuncEps1(3*f-2)= FuncEps1(3*f-3) ! if the node is repeating, the value has been computed already
-    else 
+    if (f>1) then 
+     if (NodesEps1(2*f-1) == NodesEps1(2*f-2)) then 
+      FuncEps1(3*f-2)= FuncEps1(3*f-3) ! if the node is repeating, the value has been computed already
+     else 
+      FuncEps1(3*f-2) = EvalPhiPostCollIntegrand(xiu,xiv,xiw,xi1u,xi1v,xi1w,ugu,ugv,ugw,ugux2,ugvx2,ugwx2,&
+                ugux3,ugvx3,ugwx3,NodesEps1(2*f-1),sinchi,coschi,g1,g2,dsph,i1,varphi_xi,varphi_xi1)
+     end if 
      FuncEps1(3*f-2) = EvalPhiPostCollIntegrand(xiu,xiv,xiw,xi1u,xi1v,xi1w,ugu,ugv,ugw,ugux2,ugvx2,ugwx2,&
-                ugux3,ugvx3,ugwx3,NodesEps1(2*f-1),sinchi,coschi,g1,g2,dsph,i1,varphi_xi,varphi_xi1) 
+                ugux3,ugvx3,ugwx3,NodesEps1(2*f-1),sinchi,coschi,g1,g2,dsph,i1,varphi_xi,varphi_xi1)
     end if
    ! This takes care of the left node in the cell... 
    !  
@@ -2961,7 +3082,7 @@ intrinsic INT,Real,LOG,MIN
   integer, dimension(size(A,1)) :: ipiv   ! pivot indices
   integer :: m,n,loc_alloc_stat, info=0
   !!!!!!!!!!!!!!!!!!!!! PARAMETERS OF THE LAPACK DRIVER
-  real (DP) :: rcond = 1.0D-3 ! this is the treshlold value for SVD regularization. All singular values 
+  real (DP) :: rcond = 1.0D-5 ! this is the treshlold value for SVD regularization. All singular values 
                   ! s(i)<rcond*s(1) will be treated as 0
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   ! Parameters that are used by LAPACK. Work array sizes and related 
@@ -3115,7 +3236,11 @@ end function psi_basis_funcs
 ! 
 ! Moments are enforced beginning from 1 and finishing with some K < MaxNumEnforcedMoments
 ! with relaxation of all moments between 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!
+!
+! Attention! This version is designed to work with EvalColGrad
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 function kernls_enfrsd_moms(n,nodes_u,nodes_v,nodes_w,ubar,vbar,wbar) result (y)
 
 integer (I4B), intent (in) :: n ! the number of the basis function. 
@@ -3125,43 +3250,35 @@ real (DP), dimension(1:size(nodes_u,1)) :: y ! the value of the function
 !
 !integer (I4B) :: j ! some local counter
 
+
 !!
 select case (n)
  case(1)
-  y = 1 + nodes_u*0.0d0 ! kernel density 
+  y = ((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)/3.0_DP !pressure
  case(2) 
-  y = nodes_u			! u component of the kernel of momentum
+  y = (nodes_u-ubar)**2-((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)/3.0_DP !sigma_{11}
  case(3)
-  y = nodes_v			! v component of the kernel of momentum
+  y = (nodes_v-vbar)**2-((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)/3.0_DP !sigma_{22}
  case(4)
-  y = nodes_w			! w component of the kernel of momentum
+  y = (nodes_w-wbar)**2-((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)/3.0_DP !sigma_{33}
  case(5)  
-  y = ((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)/3.0_DP*2.0_DP		! kernel of tempearture, please notice the dimensionless factor of $2/3$
+  y = (nodes_u-ubar)*(nodes_v-vbar)  !sigma_{12}
  case(6)
-  y = (nodes_u-ubar)**2/3.0_DP*2.0_DP                                          ! directional temperature in direction u
+  y = (nodes_u-ubar)*(nodes_w-wbar)  !sigma_{13}
  case(7)
-  y = (nodes_u-ubar)**3
- case(8) 
-  y = (nodes_v-vbar)**3
+  y = (nodes_v-vbar)*(nodes_w-wbar)  !sigma_{23}
+ case(8)
+  y = ((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)*(nodes_u-ubar)/2.0_DP !q_1
  case(9)
-  y = (nodes_u-ubar)**4
+  y = ((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)*(nodes_v-vbar)/2.0_DP !q_2
  case(10)
-  y = (nodes_v-vbar)**4
- case(11)
-  y = (nodes_u-ubar)**5
- case(12)
-  y = (nodes_v-vbar)**5
- case(13)
-  y = (nodes_u-ubar)**6
- case(14)
-  y = (nodes_v-vbar)**6
- case(15)
-  y = (nodes_u-ubar)**7 
+  y = ((nodes_u-ubar)**2+(nodes_v-vbar)**2+(nodes_w-wbar)**2)*(nodes_w-wbar)/2.0_DP !q_3
  case default
   print *, "kernls_enfrsd_moms: Can not process: n=", n
   stop
 end select 
 end function kernls_enfrsd_moms
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 !! ComputeRelaxRatesBCI_DGV
@@ -3460,7 +3577,9 @@ do i=1,Order
    end if  
    ! now the final result can be multiplied by the same coefficient as the ES-BGK model.
  else 
-   momsrates(i) = nu ! the rate can not be compute reliably -- use provided default value.
+   ! momsrates(i) = nu ! the rate can not be compute reliably -- use provided default value.
+   ! We will try to use zero as the default "noisy signal or no signal" relaxation rate. Otherwise comment this line and uncomment the line above
+   momsrates(i) = 0 ! the rate can not be compute reliably -- use provided default value.
  end if 
 end do 
 end subroutine ComputeRelaxRatesBCIa_DGV
@@ -3480,7 +3599,6 @@ use DGV_commvar, only: nodes_primcellII,cells_gou,cells_gov,cells_gow,&
                  nodes_uII,nodes_vII,nodes_wII,&
                  nodes_pcell,nodes_ui,nodes_vi,nodes_wi,&
                  g_nds_all
-
 
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
