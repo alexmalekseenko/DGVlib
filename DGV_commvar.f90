@@ -241,7 +241,7 @@ logical :: Nu1DUpdateArrysAllocated = .false.
 
 ! The names of computed solution file and the directory to store it
 character (len=50) :: current_solution_dir  ! name of the directory (relative to the local tree?) where the solution is stored
-character (len=20) :: current_solution_base_name ! base name for the solution file -- more information about order, mesh, and time is added to it automatically
+character (len=40) :: current_solution_base_name ! base name for the solution file -- more information about order, mesh, and time is added to it automatically
 !!!!
 ! varaibles related to generation of non-unifom meshes: 
 

@@ -3906,6 +3906,442 @@ end do
 !
 end subroutine SortNodesProcs
 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Subrouine InitDGV0D_MPI(irank)
+!
+! This is a modificationm of the subroutine InitDGV0D from DGV-miscset
+! adjusted for an MPI implementation 
+!
+!
+!
+! This is a conglomerate subrouine that 
+! performes initialization of the 
+! parameters, contants and the variables 
+! of the DGV Library
+!
+! 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+subroutine InitDGV0D_MPI(irank)
+
+use DGV_readwrite
+
+use DGV_commvar, only: Mv,Mu,Mw,su,sv,sw,nodes_u,nodes_v,&
+                  nodes_w,nodes_gwts,nodes_uII,&
+                  MvII,MuII,MwII,suII,svII,swII, &    
+                  Mu_list,Mv_list,Mw_list,su_list,sv_list,sw_list,&
+                  min_sens,Trad,run_mode,&
+				  Order_nu,Order,SecondaryVelGridInUse,&
+				  MoRatesArry0DAllocated,MoRatesArry0D,Cco,&
+				  NuNextUpdateTime0D,NuLastDens0D,NuLastTemp0D,&
+				  TotNumSpatCells,MoRatesReliable0D,run_mode,&
+				  num_Acopies,num_lin_proc,lin_proc_nodes_wld,&
+				  nodes_u_loc,nodes_v_loc,nodes_w_loc,nodes_gwts_loc
+				  
+
+
+use DGV_dgvtools_mod
+
+use DGV_miscset
+
+!!!
+include 'mpif.h' ! THIS IS TO ENABLE THE MPI ROUTINES
+!!!                    
+ 
+!!!!!!!!!!!!!! Variables
+integer, intent (in) :: irank !  MPI variable -- the number of the processor that runs this code.
+
+integer (I4B) :: loc_alloc_stat ! to keep allocation status
+integer (I4B) :: nn,i,j ! scrap variables
+
+!!!!!!!!!!!!!! Variables to set up MPI parallelization algorithm
+integer (I4B), dimension (:,:), allocatable :: chnks_copies !this arrays gives first and last processor in a group that share a copy of A
+integer (I4B), dimension (:,:), allocatable :: nodes_proc_groups ! this array will contain the breaking of velocity nodes among the Acopy universes
+                     ! format nodes_proc_groups(a,b) a=1 or 2, b=the index of the Acopy universe, a=1,num_Acopies
+                     ! nodes_proc_groups(1,b) is the first and nodes_proc_groups(2,b) is the last node assigned to the Acopy Univ #b           
+integer (I4B), dimension (:,:), allocatable :: procs_lin ! this one will contain the nodes allocation to the group of processors consolidating the linearized operator. 
+                          !it is a scrap variable and once the jobs are disctibuted, it will be deallocated...        
+
+
+! variables for MPI Calls
+integer ::  mpicommworldsize,ierr 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! the next group of commands will initiate the key variables of the 
+! DGV library. Change this commands if you need 
+! different functionality of the library -- say if it is 
+! desired to have a different initial velocity grid 
+! or additional DGV variables need to be intitialized. 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! First we read parameters from the DGV library parameter file.
+! the file name "DGVparametes.dat" is currently reserved for the DGV parameters. 
+! However, this name can be changes
+! by default, the file should be located in the same directory where the executable is started
+!
+if (irank==0) then 
+ call SetDGVParams("DGVparameters.dat",0)
+else
+ call SetDGVParams("DGVparameters.dat",1)
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+Mv=Mv_list(1)
+Mu=Mu_list(1)
+Mw=Mw_list(1)
+su=su_list(1)
+sv=sv_list(1)
+sw=sw_list(1)
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+call SetGDVGnodes    ! set some supplementary arrays to be used in building meshes
+call SetDGVblzmmesh  ! sets one-dimensional grids in u,v, and w
+! newt we build the velocity discretization 
+call Set3DCellsR_DGV ! We create initial the velocity cells
+call SetNodesDGV ! this will populate velocity cells with the 
+! nodal - DG velocity nodes (see the description of the nodal-DG approach)
+
+!!!!!!
+! If you need to refine the velocity cells the following subroutines can be used: 
+! in the next two lines the cell number 14 isdivived in 8 cubcells and in the next line
+! the cell number 41 in the new mech is divided into 27 cubcells
+!!! call CellsRefineDGV((/ 14 /),2,2,2) ! 
+!!! call CellsRefineDGV((/ 27 + 14 /),3,3,3)
+
+!!!!!!!!!!!!!!!!!!!!!!!!
+! if one wants to record the cells, gridds and nodes information, use the following commands
+! the parameters for the files names are taken from the DGV library parameter file
+! the grids, cells, and nodes can be used in Matlab graphing subroutines. 
+! they are usually not used in restart. 
+!
+!!!!!!!!!!!!!!!!!!!!!!!!!
+if (irank==0) then 
+ call WriteGridsDGV
+ call WriteCellsDGV
+ call WriteNodesDGV
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! Additional subroutines: 
+! call WriteI1DGV(0.0_DP,0.0_DP,0.0_DP) ! this one will print the number of velocity nodes that 
+                ! is contained in the cell that has the given velocity point
+! call InitWriteDet    ! velocity dependent collision frequency. These subroutines only create an empty file. 
+                ! later calls of related subroutines will save some diagnostic data in the created 
+                ! files. These files make problems in many clusters becuase of the 
+                ! writing protection. If the file is not deleted, it can not be overwritten by 
+                ! a new instance of the running software -- we commented the use of the subroutines for now
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! CREATING NEW OPERATORS A and Akor
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! This is a call that usually is commented. 
+! the next subroutines are an OpenMP subroutines
+! that are included in this library and will create a 
+! new instance of Operator A or Akor.  Specifically, 
+! Operators A and Akor depends on the collision model and 
+! the DG discretization. Note that subrouitnes creating the operator 
+! A and Akor use the primary mesh. (In contrast, when we use pre-computed Operators A and Akor, 
+! we can use eithr primary or secondary meshes) Once the (primary) DG discretization is set, 
+! on can compute the Operators A or Akor. To do that, uncomment the corresponding line below
+! Be aware that pre-comupting A and Akor is a very slow process and 
+! usually should not be attempted on one processor for 
+! meshes exceeding 33^3 velocity notes. 
+!  
+!!!!!!!!!!!!!!!!!
+! For lagre meshes, one should use MPI versio of the 
+! subroutine SetA_DGV . 
+!
+! TO BE ADDED LATER...  
+!
+!  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+! Once the Operator A arrays are computed, 
+! we need to save then on the hard drive in the 
+! directory specified in the DGV parameter file
+! To save Operator A on thehard Drive use the 
+! the following subroutine 
+!!!!!!!
+! call WriteAarraysDGV
+! call WriteAKorArraysDGV
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! MPI parallelization environment variables and setup
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!! Check the size of the MPI Universs = the total number of processors in the Universe.
+call MPI_COMM_SIZE(MPI_COMM_WORLD,mpicommworldsize,ierr) ! check how many processors is in the main communicator
+!! BEGIN quick fix
+!! ATTENTION: the 0d3v and 1d3v codes uses a lot of collective communications. It is required that all processors in the universe make 
+!! the same communication call. Otherswise the code will get stuck. Portion of the libraries were programmed that only processors 
+!! with ranks<num_lin_proc participate in the solution. This generate a conflict with making collective communications calls.
+!! So, we either replace collective operators with individual (MPI_FILE_write_all with MPI_FILE_WRITE) or make sure that all 
+!! processors are calling them at the same time.
+!! we will go with the second solution, so we hardcoding a reset of num_lin_proc to be equal to the size of the MPI Common World
+!!
+!! CHANGED Communicator to MPI_LINEAR_COLL_WORLD in all of these == should be good for now, but will require calling PrepMPICollsnDGV_Univs_highperf
+if (num_lin_proc/=mpicommworldsize) then
+ num_lin_proc=mpicommworldsize
+ if (irank==0) then 
+  print*,"InitDGV0D_MPI: Re-setting num_lin_proc=mpicommworldsize:", mpicommworldsize
+ end if 
+end if 
+!
+if (num_Acopies>1) then
+ num_Acopies=1
+ if (irank==0) then 
+  print*,"InitDGV0D_MPI: Re-setting num_Acopies=", num_Acopies
+ end if 
+end if 
+!! END quick fix 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! Next we prepare three important arrays: num_chnks, nodes_proc_groups and procs_lin. 
+!! These arrays determine the workload of nonlinear evaluation of 
+!! the collision operator and the workload for evaluation of the linearized collision operator, 
+!! respectively. 
+!! First, let us work on the array chnks_copies(2,1:num_Acopies)
+allocate (chnks_copies(2,1:num_Acopies), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then 
+  print *, "InitDGV0D_MPI: Allocation error for variables chnks_copies. stop"
+  stop
+end if
+chnks_copies=0 ! nullify, just in case.
+!! Next we will call the subroutine DivideRangeContinuous to divide the processors between copies of A:
+!! in particular, a copy of A will be distributed between processors with number chnks_copies(1,1)=1 (master #0 does not get any) 
+!! and chnks_copies(2,1)=XX. Another copy will be distributed between chnks_copies(1,2)=XX+1 and chnks_copies(2,2)=YY and so on.
+!! 
+call DivideRangeContinuous(chnks_copies,1,mpicommworldsize-1)
+!! now chnks_copies will contain the information on groups of processors that share one copy of A between them. 
+!! (the number fo the first and the last processors that contain this particular copy of A. num_Acopies  -- is the number of copies) 
+!! 
+!! Next we distribute workload between processor groups. It is assumed that since a copy of A is shared 
+!! between processors in a group, all of them are needed to evaluate the collision operator for a single 
+!! velocity point. This is true for s=1, but for s>1 not all processors in the group are needed to evaluate 
+!! collision operator at a velocity node. This can be used later to tune up the work load a bit better later. 
+!! At this moment, however, we will take all nodes where the colliision operator needs to be evaluated and we 
+!! divide these velocity nodes between the groups of processors, thus creating a workload for each group.
+!! Later this array will be used to assign individual workloads for 
+!! each processor. 
+nn = size(nodes_u,1) ! Total number of nodes numbered beginning from 1 where the collision integral needs to be evaluated.  
+!! first we divide all velocity nodes between the groups of processors. We have exacly (num_Acopies) processor groups 
+allocate (nodes_proc_groups(2,1:num_Acopies), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then 
+ print *, "InitDGV0D_MPI: Allocation error for variables nodes_proc_groups. stop"
+ stop
+end if
+call DivideRangeContinuous(nodes_proc_groups,1,nn)
+!! we divided velocity nodes between the groups of processors sharing copies of A.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+!! We make one more preparation for the future: we 
+!! setup the array procs_lin that tells the workload for each processor involved in the evaluation of the 
+!! linearized collision operator. Similarly to the above, simply divide velocity nodes between the 
+!! processors involved in the evaluation of linearied collision operator.  
+allocate (procs_lin(2,1:num_lin_proc), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then 
+ print *, "InitDGV1D_MPI: Allocation error for variable procs_lin. Stop"
+ stop
+end if
+!! we populate the linearized group of processors with assgined nodes
+call DivideRangeContinuous(procs_lin,1,nn)
+!! end of creating proc_lin: all processors are divided in groups and each group is assgned some number of velocity nodes 
+!! Note that if 1D-3D spatial operator is parallelized in velocity variable, proc_lin can be used to determine the work load. 
+!! for each processor 
+!! arrays procs_lin, nodes_proc_groups and chnks_copies have been created !  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!! MPI FORK -- creating Linearization Workload Array -- is used to parallelize the transport part.
+!!! The workload arrays are created only on processors participating in evaluation of linearied collision oparator
+!!! Note that the same processor will be used to parallelize transport part in velocity space. The same breaking is uses
+!!! for parallelization of the transport part as for evaluation linearized operator
+if (irank < num_lin_proc) then 
+  nn = procs_lin(2,irank+1) - procs_lin(1,irank+1)+1 ! this is the total number of velocity nodes that will be assigned to this processor 
+  allocate (lin_proc_nodes_wld(1:nn),stat=loc_alloc_stat)
+  if (loc_alloc_stat >0) then 
+   print *, "InitDGV0D_MPI: Allocation error for variable (lin_proc_nodes_wld) on  node", irank, ". Stop"
+   stop
+  end if
+  !! finaly we need to write all the nodes to the lin_proc_nodes_wld
+  do i = procs_lin(1,irank+1),procs_lin(2,irank+1)
+   lin_proc_nodes_wld(i-procs_lin(1,irank+1)+1) = i ! lin_proc_nodes_wld contains all velocity nodes (actually, their numbers) beginning from procs_lin(1,irank+1) and ending at procs_lin(2,irank+1)
+  end do 
+  !! end populating the lin_proc_nodes_wld 
+  allocate (nodes_u_loc(1:size(lin_proc_nodes_wld,1)),nodes_v_loc(1:size(lin_proc_nodes_wld,1)),&
+          nodes_w_loc(1:size(lin_proc_nodes_wld,1)),nodes_gwts_loc(1:size(lin_proc_nodes_wld,1)), stat=loc_alloc_stat)
+  if (loc_alloc_stat >0) then 
+   print *, "InitDGV0D_MPI: Allocation error for variable (nodes_u_loc,nodes_v_loc,nodes_w_loc,nodes_gwts)"
+  end if 
+  !!!!!!!!!!!!!!!!
+  ! prepare copies of the velocity nodes to be used on this processor
+  do i=1,size(lin_proc_nodes_wld,1)
+   j=lin_proc_nodes_wld(i)
+   nodes_u_loc(i)=nodes_u(j)
+   nodes_v_loc(i)=nodes_v(j)
+   nodes_w_loc(i)=nodes_w(j)
+   nodes_gwts_loc(i)=nodes_gwts(j)
+  end do  
+  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end if  
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!! UNCOMMENT BELOW IF USING Boltzmann Collision on primary mesh
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!! Uncomment the following subroutine if desire to have communicators between groups of processors sharing a copy of A
+!!! and groups of processors using information from processors sharing as copy of A.
+!!! iT ALSO SETS setting us workload/send/recieve/ arrays to make processor work together. 
+call PrepMPICollsnDGV_Univs_highperf(irank,chnks_copies,nodes_proc_groups,procs_lin)
+!!! Uncomment the following subroutine if desire to use evaluation of the collision operator using primary mesh.   
+!!! The subrouine implements reading appropiate portions of operator A into memory of processors 
+call PrepMPICollsnDGV_ReadOpA_highperf(irank,chnks_copies,nodes_proc_groups)
+deallocate(chnks_copies,nodes_proc_groups,procs_lin)
+!!!
+!!!
+!! END READ pre-computed operators A
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! The following few lines set up necessary variables to work with the Boltzmann collision integral. 
+! We note that in this code, the Botlzmann collision integral is using secondary mesh. This means that
+! the unknown solution will have to be mapped between the primary and secondary meshes. The secondary mesh, 
+! in principle can be the same as primary -- then no interpolation is needed. However, in general, secondary mesh is coarser a
+! and is use to evaluate the full Boltzmann Collision integral (it might be that the task is just too expensive on the primary mesh
+!
+! Because the collisio operator will use secondary mesh we check the flag SecondaryVelGridInUse whether 
+! the secondary mesh is in use. If it is, we create the mesh and then may read the operator A
+!
+if (SecondaryVelGridInUse) then 
+! We create variables of the secondary mesh
+! A quick check of we have paparameters of the secondary mesh defined: 
+ if ((size(Mu_list,1)<2) .or. (size(Mv_list,1)<2) .or. (size(Mw_list,1)<2) .or. &
+           (size(su_list,1)<2) .or. (size(sv_list,1)<2) .or. (size(sw_list,1)<2) ) then 
+  ! Error -- secondary mesh requested, but at least one parameter is missing for it 
+  print *, "InitDGV0D_MPI: Secondary velocity mesh has been requested, but at least one parameter is missing for secondary mesh."  
+  stop
+  ! 
+ end if
+ ! set up the parameters of the secondary nodal-DG discretization. Secondary and primary discretizations use the same 
+ ! boundaries in the velocity space
+ MvII=Mv_list(2)
+ MuII=Mu_list(2)
+ MwII=Mw_list(2)
+ suII=su_list(2)
+ svII=sv_list(2)
+ swII=sw_list(2)
+ ! ready to create secondary meshes 
+ ! NOTE: the suffix II in the name indicates that the subroutine works with the second mesh 
+ call SetDGVblzmmeshII  ! sets one-dimensional grids in u,v, and w 
+ ! newt we build the velocity discretization 
+ call Set3DCellsR_DGVII ! We create initial velocity cells
+ call SetNodesDGVII ! this will populate velocity cells with the 
+ ! nodal - DG velocity nodes (see the description of the nodal-DG approach)
+
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! Initializing a PRE-COMPUTED Operator A
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! Note that Pre-computed Operator A wil be used for evaluating collision integral and estimating relaxation rates. 
+ ! These rates will be used in the velocity dependent BGK model. For this model evaluatin will be done using secondary grid. 
+ ! Therefore one needs to indicate that secondary velocoity grid is used.
+ ! For that the flag SecondaryVelGridInUse needs to be set true in the DGVparameters file.
+ ! 
+ ! It may happen that the secondary grid is the same as the primary, but in general we 
+ ! will expect that the solution is interpolated between the grids
+ !!!!!!!!!!!!!!! 
+
+ ! The evaluation of the Boltzmann collision operator in the method of 
+ !  Alekseenko-Josyula requires the 
+ ! knowledge of pre-computed Operator A. 
+ ! There has been a library of instances of 
+ ! Operator A computed for different parameters of DG discretizations
+ ! The pre-computed operator is loaded using the next batch of commands:
+ !
+ !!!!!!!!!!!!!!!!!!!!!!!! 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ ! Next we prepare three important arrays: num_chnks, nodes_proc_groups and procs_lin. 
+ ! These arrays determine the workload of nonlinear evaluation of 
+ ! the collision operator and the workload for evaluation of the linearized collision operator, 
+ ! respectively. 
+ ! First, let us work on the array2 chnks_copies(2,1:num_Acopies)
+ allocate (chnks_copies(2,1:num_Acopies), stat=loc_alloc_stat)
+ if (loc_alloc_stat >0) then 
+   print *, "InitDGV1D_MPI: Allocation error for variables chnks_copies. stop"
+   stop
+ end if
+ chnks_copies=0 ! nullify, just in case.
+ !! Next we will call the subroutine DivideRangeContinuous to divide the processors between copies of A:
+ !! in particular, a copy of A will be distributed between processors with number chnks_copies(1,1)=1 (master #0 does not get any) 
+ !! and chnks_copies(2,1)=XX. Another copy will be distributed between chnks_copies(1,2)=XX+1 and chnks_copies(2,2)=YY and so on.
+ !! 
+ call DivideRangeContinuous(chnks_copies,1,mpicommworldsize-1)
+ !! now chnks_copies will contain the information on groups of processors that share one copy of A between them. 
+ !! (the number fo the first and the last processors that contain this particular copy of A. num_Acopies  -- is the number of copies) 
+ !! 
+ !! Next we distribute workload between processor groups. It is assumed that since a copy of A is shared 
+ !! between processors in a group, all of them are needed to evaluate the collision operator for a single 
+ !! velocity point. This is true for s=1, but for s>1 not all processors in the group are needed to evaluate 
+ !! collision operator at a velocity node. This can be used later to tune up the work load a bit better later. 
+ !! At this moment, however, we will take all nodes where the colliision operator needs to be evaluated and we 
+ !! divide these velocity nodes between the groups of processors, thus creating a workload for each group.
+ !! Later this array will be used to assign individual workloads for 
+ !! each processor. 
+ nn = size(nodes_uII,1) ! Total number of nodes numbered beginning from 1 where the collision integral needs to be evaluated.  
+ !! first we divide all velocity nodes between the groups of processors. We have exacly (num_Acopies) processor groups 
+ allocate (nodes_proc_groups(2,1:num_Acopies), stat=loc_alloc_stat)
+ if (loc_alloc_stat >0) then 
+  print *, "InitDGV0D_MPI: Allocation error for variables nodes_proc_groups. stop"
+  stop
+ end if
+ call DivideRangeContinuous(nodes_proc_groups,1,nn)
+ !! we divided velocity nodes between the groups of processors sharing copies of A.
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! 
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !!! UNCOMMENT BELOW IF USING Boltzmann Collision on Secondary Mesh
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !!! Uncomment the following subroutine if desire to have communicators between groups of processors sharing a copy of A
+ !!! and groups of processors using information from processors sharing as copy of A.
+ !!! iT ALSO SETS setting us workload/send/recieve/ arrays to make processor work together. 
+ call PrepMPICollsnDGV_Univs_highperfII(irank,chnks_copies,nodes_proc_groups)
+ !!! Uncomment the following subroutine if desire to use evaluation of the collision operator using primary mesh.   
+ !!! The subrouine implements reading appropiate portions of operator A into memory of processors 
+ call PrepMPICollsnDGV_ReadOpA_highperfII(irank,chnks_copies,nodes_proc_groups)
+ deallocate(chnks_copies,nodes_proc_groups)
+ !
+ ! Another preparatory call. This one sets up array (nodes_primcellII) used for projecting the primary solution on the secondary mesh
+ call prepare_sDGVpMap_DGV ! this subroutine nodes_primcellII
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+end if 
+! End of the section dedicated to secondary mesh and end of preparatory work for
+! Using full Botlzmann collision operator. 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+!!!! DIAGNOSTIC for Prakash can remove later... !!!! 
+! allocate the arrays used for preserving the coefficients of the velocity dependent collision frequency
+allocate (Cco(Order_nu), stat=loc_alloc_stat)
+if (loc_alloc_stat >0) then
+ print *, "InitDGV0D_MPI: Allocation error for (Cco)"
+end if
+Cco=0 ! reset the coefficients to zero
+!!!!!!!!!!!!!!!!!!!!!!! END Diagnostic for prakash. Can remove later... 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! next we check if the storage for the moments rates that are used in the velocity dependent collision frequency has been created yet
+if (.not. MoRatesArry0DAllocated) then 
+ ! we need to create the array for storing the coefficients of the velocity dependent collision frequency: 
+ allocate (MoRatesArry0D(1:Order), stat=loc_alloc_stat)
+ if (loc_alloc_stat >0) then 
+   print *, "InitDGV0D_MPI: Error allocation arrays to store coefficient of the VDCF (MoRatesArry0D)"
+   stop
+ end if 
+ MoRatesArry0DAllocated = .true.
+ ! Also, we will set up the other arrays to make sure that the coefficients are updated:
+ MoRatesArry0D = 0 ! reset the array
+end if 
+! reset the flag is the relaxation rates are reliable: 
+MoRatesReliable0D = .false. ! reset the coefficients to false
+!
+NuNextUpdateTime0D = - 100000.0   ! these bogus values will set off the criteria for update
+NuLastDens0D = -100000.0 
+NuLastTemp0D = -100000.0 
+! 
+!!!!!!!!!!!!!!!!!!!!!!!    
+!! INITIALIZE THE RUN_MODE to ZERO -- in the beginning the regime is strongly non-linear
+  run_mode=0
+!!!!!!!!!!!!!!!!!!!!!!!
+
+
+end subroutine InitDGV0D_MPI
+
+
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ! Subrouine InitDGV1D_MPI(nspatialcells)
@@ -6324,7 +6760,7 @@ if (updateNulcl) then
    mpi_dgv_action = 402 ! integer2, request evaluation of the collision operator on the secondary mesh using full mixed model
    ibuff(1)=402
   end if 
-  call mpi_bcast (ibuff,1,MPI_INTEGER2,0,MPI_COMM_WORLD,ierr)
+  call mpi_bcast (ibuff,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
   if (ierr /= 0 ) then 
    print *,"GetRelaxRates1Donecell_DGV_MPI:  slave processor", irank,&
           "MPI boradcast of mpi_dgv_action from proc 0 returned error", ierr
@@ -6665,7 +7101,7 @@ if (updateNulcl) then
    mpi_dgv_action = 402 ! integer2, request evaluation of the collision operator on the secondary mesh using full mixed model
    ibuff(1)=402
   end if 
-  call mpi_bcast (ibuff,1,MPI_INTEGER2,0,MPI_COMM_WORLD,ierr)
+  call mpi_bcast (ibuff,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
   if (ierr /= 0 ) then 
    print *,"GetRelaxRates1Donecell_DGV_MPI:  slave processor", irank,&
           "MPI boradcast of mpi_dgv_action from proc 0 returned error", ierr
@@ -6857,7 +7293,7 @@ call mpi_comm_rank(MPI_COMM_WORLD,irank,ierr) ! check what processor the program
 mpi_dgv_action=0
 do while (mpi_dgv_action /= -777)
  ibuff=0  
- call mpi_bcast (ibuff,1,MPI_INTEGER2,0,MPI_COMM_WORLD,ierr)
+ call mpi_bcast (ibuff,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
  if (ierr /= 0 ) then 
   print *,"FlyTrap1Donecell_DGV_MPI:  slave processor", irank,&
          "MPI boradcast of mpi_dgv_action from proc 0 returned error", ierr
